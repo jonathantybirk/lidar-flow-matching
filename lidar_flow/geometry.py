@@ -1,0 +1,151 @@
+from dataclasses import dataclass
+
+import numpy as np
+import numpy.typing as npt
+import trimesh
+
+from lidar_flow.config import SensorConfig
+
+FloatArray = npt.NDArray[np.floating]
+
+
+@dataclass(frozen=True)
+class NormalizedMesh:
+    mesh: trimesh.Trimesh
+    object_from_original: FloatArray
+
+
+def surface_centroid(mesh: trimesh.Trimesh) -> FloatArray:
+    if not np.isfinite(mesh.area) or mesh.area <= 0:
+        raise ValueError("Mesh must have positive finite surface area")
+    face_centroids = mesh.triangles.mean(axis=1)
+    return np.average(face_centroids, axis=0, weights=mesh.area_faces)
+
+
+def normalize_mesh(mesh: trimesh.Trimesh) -> NormalizedMesh:
+    centroid = surface_centroid(mesh)
+    centered_vertices = mesh.vertices - centroid
+    radius = np.linalg.norm(centered_vertices, axis=1).max()
+    if not np.isfinite(radius) or radius <= 0:
+        raise ValueError("Mesh must have nonzero finite radius")
+    z_up_from_y_up = np.array(
+        ((1.0, 0.0, 0.0), (0.0, 0.0, -1.0), (0.0, 1.0, 0.0)),
+        dtype=np.float32,
+    )
+
+    normalized = mesh.copy()
+    normalized.vertices = centered_vertices @ z_up_from_y_up.T / radius
+
+    object_from_original = np.eye(4, dtype=np.float32)
+    object_from_original[:3, :3] = z_up_from_y_up / radius
+    object_from_original[:3, 3] = -(z_up_from_y_up @ centroid) / radius
+    return NormalizedMesh(normalized, object_from_original)
+
+
+def sample_surface(
+    mesh: trimesh.Trimesh, count: int, rng: np.random.Generator
+) -> FloatArray:
+    face_indices = rng.choice(
+        len(mesh.faces), size=count, p=mesh.area_faces / mesh.area
+    )
+    triangles = mesh.triangles[face_indices]
+
+    u = np.sqrt(rng.random(count))
+    v = rng.random(count)
+    weights = np.column_stack((1.0 - u, u * (1.0 - v), u * v))
+    return np.einsum("ni,nij->nj", weights, triangles)
+
+
+def _look_at_origin(sensor_position: FloatArray) -> FloatArray:
+    forward = -sensor_position / np.linalg.norm(sensor_position)
+    reference_up = np.array([0.0, 0.0, 1.0])
+    if abs(np.dot(forward, reference_up)) > 0.99:
+        reference_up = np.array([0.0, 1.0, 0.0])
+
+    right = np.cross(reference_up, forward)
+    right /= np.linalg.norm(right)
+    up = np.cross(forward, right)
+
+    object_from_sensor = np.eye(4, dtype=np.float32)
+    object_from_sensor[:3, :3] = np.column_stack((right, up, forward))
+    object_from_sensor[:3, 3] = sensor_position
+    return object_from_sensor
+
+
+def sample_sensor_poses(
+    count: int,
+    distance: float,
+    minimum_elevation_degrees: float,
+    maximum_elevation_degrees: float,
+    rng: np.random.Generator,
+) -> FloatArray:
+    azimuth = 2 * np.pi * (np.arange(count) + rng.random(count)) / count
+    elevation_bins = (np.arange(count) + rng.random(count)) / count
+    rng.shuffle(elevation_bins)
+    minimum_sine = np.sin(np.deg2rad(minimum_elevation_degrees))
+    maximum_sine = np.sin(np.deg2rad(maximum_elevation_degrees))
+    elevation = np.arcsin(minimum_sine + elevation_bins * (maximum_sine - minimum_sine))
+
+    positions = distance * np.column_stack(
+        (
+            np.cos(elevation) * np.cos(azimuth),
+            np.cos(elevation) * np.sin(azimuth),
+            np.sin(elevation),
+        )
+    )
+    return np.stack([_look_at_origin(position) for position in positions])
+
+
+def make_ray_directions(config: SensorConfig) -> FloatArray:
+    if config.height * config.width > np.iinfo(np.uint16).max:
+        raise ValueError("Sensor grid exceeds the ray-index data type")
+    horizontal = np.linspace(
+        -np.deg2rad(config.horizontal_fov_degrees) / 2,
+        np.deg2rad(config.horizontal_fov_degrees) / 2,
+        config.width,
+    )
+    vertical = np.linspace(
+        -np.deg2rad(config.vertical_fov_degrees) / 2,
+        np.deg2rad(config.vertical_fov_degrees) / 2,
+        config.height,
+    )
+    horizontal_grid, vertical_grid = np.meshgrid(horizontal, vertical)
+    directions = np.stack(
+        (
+            np.tan(horizontal_grid),
+            np.tan(vertical_grid),
+            np.ones_like(horizontal_grid),
+        ),
+        axis=-1,
+    )
+    return directions / np.linalg.norm(directions, axis=-1, keepdims=True)
+
+
+def simulate_scan(
+    mesh: trimesh.Trimesh,
+    object_from_sensor: FloatArray,
+    sensor_directions: FloatArray,
+) -> tuple[npt.NDArray[np.uint16], FloatArray]:
+    object_directions = sensor_directions @ object_from_sensor[:3, :3].T
+    flat_directions = object_directions.reshape(-1, 3)
+    origins = np.repeat(object_from_sensor[None, :3, 3], len(flat_directions), axis=0)
+
+    locations, ray_indices, _ = mesh.ray.intersects_location(
+        ray_origins=origins,
+        ray_directions=flat_directions,
+        multiple_hits=False,
+    )
+    distances = np.linalg.norm(locations - origins[ray_indices], axis=1)
+    order = np.argsort(ray_indices)
+    return ray_indices[order].astype(np.uint16), distances[order].astype(np.float32)
+
+
+def points_from_scan(
+    ranges: FloatArray,
+    ray_indices: npt.NDArray[np.integer],
+    sensor_directions: FloatArray,
+    object_from_sensor: FloatArray,
+) -> FloatArray:
+    sensor_hits = sensor_directions.reshape(-1, 3)[ray_indices]
+    object_directions = sensor_hits @ object_from_sensor[:3, :3].T
+    return object_from_sensor[:3, 3] + object_directions * ranges[:, None]

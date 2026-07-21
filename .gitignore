@@ -1,0 +1,9 @@
+.DS_Store
+.venv/
+__pycache__/
+*.py[cod]
+AGENTS.md
+
+data/
+artifacts/
+runs/
