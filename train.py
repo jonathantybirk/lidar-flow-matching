@@ -3,12 +3,14 @@ import copy
 import json
 import math
 import random
+import sys
 from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from lidar_flow.config import load_experiment_config
 from lidar_flow.dataset import CompletionDataset
@@ -26,6 +28,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output", type=Path, default=ROOT / "runs" / "chairs")
     parser.add_argument("--resume", type=Path)
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--workers", type=int)
     return parser.parse_args()
 
 
@@ -122,6 +126,8 @@ def main() -> None:
     args = parse_args()
     config = load_experiment_config(args.config)
     training = config.training
+    batch_size = args.batch_size or training.batch_size
+    workers = training.workers if args.workers is None else args.workers
     random.seed(training.seed)
     np.random.seed(training.seed)
     torch.manual_seed(training.seed)
@@ -140,11 +146,11 @@ def main() -> None:
     loaders = {
         split: DataLoader(
             dataset,
-            batch_size=training.batch_size,
+            batch_size=batch_size,
             shuffle=split == "train",
-            num_workers=training.workers,
+            num_workers=workers,
             pin_memory=target_device.type == "cuda",
-            persistent_workers=training.workers > 0,
+            persistent_workers=workers > 0,
             drop_last=split == "train",
         )
         for split, dataset in datasets.items()
@@ -177,17 +183,25 @@ def main() -> None:
         scheduler.load_state_dict(checkpoint["scheduler"])
         start = checkpoint["step"]
 
-    configuration = {
-        "model": asdict(config.model),
-        "training": asdict(config.training),
-    }
+    training_values = asdict(config.training)
+    training_values.update(batch_size=batch_size, workers=workers)
+    configuration = {"model": asdict(config.model), "training": training_values}
     (args.output / "config.json").write_text(
         json.dumps(configuration, indent=2) + "\n", encoding="utf-8"
     )
     iterator = iter(loaders["train"])
     model.train()
     running = 0.0
-    for step in range(start + 1, training.steps + 1):
+    progress = tqdm(
+        range(start + 1, training.steps + 1),
+        total=training.steps,
+        initial=start,
+        desc=f"Training on {target_device.type}",
+        unit="step",
+        dynamic_ncols=True,
+        disable=not sys.stderr.isatty(),
+    )
+    for step in progress:
         try:
             batch = next(iterator)
         except StopIteration:
@@ -211,18 +225,23 @@ def main() -> None:
         optimizer.step()
         scheduler.step()
         update_ema(ema, model, training.ema_decay)
-        running += loss.item()
+        loss_value = loss.item()
+        running += loss_value
+        progress.set_postfix(
+            loss=f"{loss_value:.4f}",
+            lr=f"{scheduler.get_last_lr()[0]:.2e}",
+            refresh=False,
+        )
 
         if step % training.log_every == 0:
-            print(
+            progress.write(
                 json.dumps(
                     {
                         "step": step,
                         "loss": running / training.log_every,
                         "learning_rate": scheduler.get_last_lr()[0],
                     }
-                ),
-                flush=True,
+                )
             )
             running = 0.0
         if step % training.validate_every == 0:
