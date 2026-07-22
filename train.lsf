@@ -1,0 +1,26 @@
+#!/bin/bash
+#BSUB -q gpua100
+#BSUB -J lidar-flow
+#BSUB -n 8
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -W 14:00
+#BSUB -R "span[hosts=1] rusage[mem=4GB]"
+#BSUB -o runs/%J.log
+
+set -euo pipefail
+
+cd "$HOME/lidar-flow-matching"
+module load python3/3.14.2
+export PATH="$HOME/.local/bin:$PATH"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+
+job_data=$(mktemp -d "/tmp/lidar-flow-${LSB_JOBID}.XXXXXX")
+trap 'rm -rf "$job_data"' EXIT
+cp -a data/processed/03001627 "$job_data/"
+
+uv run python train.py \
+    --data "$job_data/03001627" \
+    --output "${OUTPUT:-runs/chairs}" \
+    --batch-size "${BATCH_SIZE:-128}" \
+    --steps "${STEPS:-100000}" \
+    --run "${RUN_NAME:-chairs-a100}"

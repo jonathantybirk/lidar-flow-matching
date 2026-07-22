@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--index", type=int, default=0)
     parser.add_argument("--samples", type=int, default=4)
     parser.add_argument("--steps", type=int, default=8)
+    parser.add_argument("--weights", choices=("model", "ema"), default="ema")
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/completions")
     return parser.parse_args()
 
@@ -35,7 +36,7 @@ def main() -> None:
     )
     config = ModelConfig(**checkpoint["config"]["model"])
     model = PointFlowTransformer(config).to(target_device).eval()
-    model.load_state_dict(checkpoint["ema"])
+    model.load_state_dict(checkpoint[args.weights])
     dataset = CompletionDataset(
         args.data, "validation", config.condition_points, config.points
     )
@@ -50,7 +51,7 @@ def main() -> None:
     target = batch["target"][0].numpy()
 
     args.output.mkdir(parents=True, exist_ok=True)
-    stem = f"{args.checkpoint.stem}_{args.index:05d}"
+    stem = f"{args.checkpoint.stem}_{args.weights}_{args.index:05d}"
     np.savez(
         args.output / f"{stem}.npz",
         generated=generated,

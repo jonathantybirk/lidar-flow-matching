@@ -23,6 +23,7 @@ The project requires Python 3.14 and [`uv`](https://docs.astral.sh/uv/).
 ```bash
 uv sync
 uv run hf auth login
+uv run wandb login
 ```
 
 ShapeNetCore access must be approved at
@@ -50,13 +51,18 @@ Training uses the train and validation splits. Configuration and checkpoints are
 written to `runs/chairs`.
 
 ```bash
-uv run python train.py
+uv run python train.py --run chairs-a100
 ```
 
 Generate validation completions from a checkpoint with:
 
 ```bash
-uv run python sample.py runs/chairs/step_0100000.pt
+uv run python sample.py runs/chairs/checkpoint.pt
 ```
+
+On DTU HPC, submit with `mkdir -p runs && bsub < train.lsf`. `STEPS`,
+`BATCH_SIZE`, `OUTPUT`, and `RUN_NAME` override the full-run defaults.
+
+Pass `--weights model` to inspect the live training weights.
 
 The model architecture and its sources are recorded in [DESIGN.md](DESIGN.md).

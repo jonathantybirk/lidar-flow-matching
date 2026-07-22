@@ -8,7 +8,7 @@ flow_layers = 8
 neighbors = 16
 
 [training]
-batch_size = 32
+batch_size = 128
 steps = 100000
 learning_rate = 0.0002
 minimum_learning_rate = 0.00002

@@ -4,6 +4,7 @@ import json
 import math
 import random
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import wandb
 
 from lidar_flow.config import load_experiment_config
 from lidar_flow.dataset import CompletionDataset
@@ -29,7 +31,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=ROOT / "runs" / "chairs")
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--steps", type=int)
     parser.add_argument("--workers", type=int)
+    parser.add_argument("--run")
     return parser.parse_args()
 
 
@@ -127,6 +131,7 @@ def main() -> None:
     config = load_experiment_config(args.config)
     training = config.training
     batch_size = args.batch_size or training.batch_size
+    steps = args.steps or training.steps
     workers = training.workers if args.workers is None else args.workers
     random.seed(training.seed)
     np.random.seed(training.seed)
@@ -169,7 +174,7 @@ def main() -> None:
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
         lambda step: learning_rate_multiplier(
-            step, training.warmup_steps, training.steps, minimum
+            step, training.warmup_steps, steps, minimum
         ),
     )
     start = 0
@@ -184,17 +189,27 @@ def main() -> None:
         start = checkpoint["step"]
 
     training_values = asdict(config.training)
-    training_values.update(batch_size=batch_size, workers=workers)
+    training_values.update(batch_size=batch_size, steps=steps, workers=workers)
     configuration = {"model": asdict(config.model), "training": training_values}
     (args.output / "config.json").write_text(
         json.dumps(configuration, indent=2) + "\n", encoding="utf-8"
     )
+    tracking = (
+        wandb.init(
+            project="lidar-flow-matching",
+            name=args.run,
+            config=configuration,
+        )
+        if args.run
+        else None
+    )
     iterator = iter(loaders["train"])
     model.train()
-    running = 0.0
+    running = {name: 0.0 for name in ("loss", "flow", "chamfer", "observation")}
+    last_log = time.perf_counter()
     progress = tqdm(
-        range(start + 1, training.steps + 1),
-        total=training.steps,
+        range(start + 1, steps + 1),
+        total=steps,
         initial=start,
         desc=f"Training on {target_device.type}",
         unit="step",
@@ -202,6 +217,7 @@ def main() -> None:
         disable=not sys.stderr.isatty(),
     )
     for step in progress:
+        tracking_metrics = {}
         try:
             batch = next(iterator)
         except StopIteration:
@@ -214,19 +230,23 @@ def main() -> None:
             dtype=torch.bfloat16,
             enabled=target_device.type == "cuda",
         ):
-            loss, _ = completion_loss(
+            loss, terms = completion_loss(
                 model,
                 batch,
                 training.chamfer_weight,
                 training.observation_weight,
             )
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), training.gradient_clip)
+        gradient_norm = torch.nn.utils.clip_grad_norm_(
+            model.parameters(), training.gradient_clip
+        )
         optimizer.step()
         scheduler.step()
         update_ema(ema, model, training.ema_decay)
         loss_value = loss.item()
-        running += loss_value
+        running["loss"] += loss_value
+        for name, value in terms.items():
+            running[name] += value.item()
         progress.set_postfix(
             loss=f"{loss_value:.4f}",
             lr=f"{scheduler.get_last_lr()[0]:.2e}",
@@ -234,18 +254,44 @@ def main() -> None:
         )
 
         if step % training.log_every == 0:
+            now = time.perf_counter()
+            tracking_metrics = {
+                f"train/{name}": value / training.log_every
+                for name, value in running.items()
+            }
+            tracking_metrics.update(
+                {
+                    "train/gradient_norm": gradient_norm.item(),
+                    "train/learning_rate": scheduler.get_last_lr()[0],
+                    "train/steps_per_second": training.log_every / (now - last_log),
+                }
+            )
+            if target_device.type == "cuda":
+                tracking_metrics["train/peak_memory_gb"] = (
+                    torch.cuda.max_memory_allocated() / 2**30
+                )
             progress.write(
                 json.dumps(
                     {
                         "step": step,
-                        "loss": running / training.log_every,
+                        "loss": tracking_metrics["train/loss"],
                         "learning_rate": scheduler.get_last_lr()[0],
                     }
                 )
             )
-            running = 0.0
-        if step % training.validate_every == 0:
-            metrics = validate(
+            running = {name: 0.0 for name in running}
+            last_log = now
+        if step % training.validate_every == 0 or step == steps:
+            model_metrics = validate(
+                model,
+                loaders["validation"],
+                target_device,
+                training.validation_batches,
+                training.chamfer_weight,
+                training.observation_weight,
+                training.seed,
+            )
+            ema_metrics = validate(
                 ema,
                 loaders["validation"],
                 target_device,
@@ -254,11 +300,31 @@ def main() -> None:
                 training.observation_weight,
                 training.seed,
             )
-            print(json.dumps({"step": step, "validation": metrics}), flush=True)
+            progress.write(
+                json.dumps(
+                    {
+                        "step": step,
+                        "validation": {"model": model_metrics, "ema": ema_metrics},
+                    }
+                )
+            )
+            tracking_metrics.update(
+                {
+                    **{
+                        f"validation/model/{name}": value
+                        for name, value in model_metrics.items()
+                    },
+                    **{
+                        f"validation/ema/{name}": value
+                        for name, value in ema_metrics.items()
+                    },
+                }
+            )
             model.train()
-        if step % training.checkpoint_every == 0:
+            last_log = time.perf_counter()
+        if step % training.checkpoint_every == 0 or step == steps:
             save_checkpoint(
-                args.output / f"step_{step:07d}.pt",
+                args.output / "checkpoint.pt",
                 model,
                 ema,
                 optimizer,
@@ -266,6 +332,10 @@ def main() -> None:
                 step,
                 configuration,
             )
+        if tracking and tracking_metrics:
+            tracking.log(tracking_metrics, step=step)
+    if tracking:
+        tracking.finish()
 
 
 if __name__ == "__main__":
