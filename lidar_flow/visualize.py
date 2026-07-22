@@ -68,13 +68,6 @@ def save_inspection_figure(
     complete_axis.set_title(f"Complete surface ({len(complete_points)} points)")
 
     observation_axis.scatter(
-        *complete_points.T,
-        s=5,
-        color="lightgray",
-        alpha=0.5,
-        label="complete",
-    )
-    observation_axis.scatter(
         *partial_points.T,
         s=9,
         color="tab:orange",

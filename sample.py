@@ -48,6 +48,8 @@ def main() -> None:
     }
     generated = sample(model, repeated, steps=args.steps).cpu().numpy()
     observed = batch["observed_xyz"][0, batch["observed_mask"][0]].numpy()
+    sensor = batch["sensor_features"][0, :3].numpy()
+    forward = batch["sensor_features"][0, 3:6].numpy()
     target = batch["target"][0].numpy()
 
     args.output.mkdir(parents=True, exist_ok=True)
@@ -58,16 +60,29 @@ def main() -> None:
         observed=observed,
         target=target,
     )
-    figure = plt.figure(figsize=(5 * args.samples, 5))
-    bounds = np.concatenate((target, observed, generated.reshape(-1, 3)))
+    figure = plt.figure(figsize=(5 * (args.samples + 1), 5))
+    arrow_end = sensor + 0.3 * forward
+    bounds = np.concatenate(
+        (target, observed, generated.reshape(-1, 3), sensor[None], arrow_end[None])
+    )
+    axis = figure.add_subplot(1, args.samples + 1, 1, projection="3d")
+    axis.scatter(*observed.T, s=8, color="tab:orange")
+    axis.scatter(*sensor, s=75, color="tab:red")
+    axis.quiver(
+        *sensor,
+        *forward,
+        length=0.3,
+        color="tab:red",
+        arrow_length_ratio=0.22,
+    )
+    axis.set_title("LiDAR observation")
+    set_equal_axes(axis, bounds)
     for index, completion in enumerate(generated, start=1):
-        axis = figure.add_subplot(1, args.samples, index, projection="3d")
-        axis.scatter(*completion.T, s=5, color="tab:blue", label="completion")
-        axis.scatter(*observed.T, s=8, color="tab:orange", label="observed")
-        axis.set_title(f"Sample {index}")
+        axis = figure.add_subplot(1, args.samples + 1, index + 1, projection="3d")
+        axis.scatter(*completion.T, s=5, color="tab:blue")
+        axis.set_title(f"Draw {index}")
         set_equal_axes(axis, bounds)
-    figure.axes[0].legend()
-    figure.tight_layout()
+    figure.tight_layout(rect=(0, 0, 1, 0.94))
     figure.savefig(args.output / f"{stem}.png", dpi=180)
     plt.close(figure)
 
