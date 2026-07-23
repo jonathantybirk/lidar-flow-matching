@@ -1,6 +1,6 @@
 # Model design
 
-The model learns a conditional distribution of 1,024-point chair surfaces from
+The model learns a conditional distribution of 1,024-point car surfaces from
 one LiDAR scan and its sensor pose.
 
 | Choice | Basis |
@@ -22,4 +22,4 @@ agreement with measured points. Sampling uses eight Heun steps.
 
 The model has 26.8 million parameters at width 256. AdamW uses a cosine schedule,
 bfloat16 arithmetic, gradient clipping, and an exponential moving average. The
-default run contains 100,000 updates with batch size 128 on one A100.
+default run contains 100,000 updates with batch size 64 on one A100.

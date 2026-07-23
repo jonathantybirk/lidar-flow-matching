@@ -26,9 +26,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train LiDAR point completion")
     parser.add_argument("--config", type=Path, default=ROOT / "configs" / "train.toml")
     parser.add_argument(
-        "--data", type=Path, default=ROOT / "data" / "processed" / "03001627"
+        "--data", type=Path, default=ROOT / "data" / "processed" / "02958343"
     )
-    parser.add_argument("--output", type=Path, default=ROOT / "runs" / "chairs")
+    parser.add_argument("--output", type=Path, default=ROOT / "runs" / "cars")
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--steps", type=int)
@@ -110,6 +110,7 @@ def save_checkpoint(
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     step: int,
     config: dict,
+    best_validation: float,
 ) -> None:
     temporary = path.with_suffix(".tmp")
     torch.save(
@@ -120,6 +121,29 @@ def save_checkpoint(
             "scheduler": scheduler.state_dict(),
             "step": step,
             "config": config,
+            "best_validation": best_validation,
+        },
+        temporary,
+    )
+    temporary.replace(path)
+
+
+def save_weights(
+    path: Path,
+    model: PointFlowTransformer,
+    ema: PointFlowTransformer,
+    step: int,
+    config: dict,
+    validation: float,
+) -> None:
+    temporary = path.with_suffix(".tmp")
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "ema": ema.state_dict(),
+            "step": step,
+            "config": config,
+            "validation": validation,
         },
         temporary,
     )
@@ -178,6 +202,7 @@ def main() -> None:
         ),
     )
     start = 0
+    best_validation = float("inf")
     if args.resume:
         checkpoint = torch.load(
             args.resume, map_location=target_device, weights_only=True
@@ -187,6 +212,7 @@ def main() -> None:
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])
         start = checkpoint["step"]
+        best_validation = checkpoint.get("best_validation", best_validation)
 
     training_values = asdict(config.training)
     training_values.update(batch_size=batch_size, steps=steps, workers=workers)
@@ -236,10 +262,16 @@ def main() -> None:
                 training.chamfer_weight,
                 training.observation_weight,
             )
+        if not torch.isfinite(loss):
+            raise FloatingPointError(f"Non-finite loss at step {step}")
         loss.backward()
         gradient_norm = torch.nn.utils.clip_grad_norm_(
-            model.parameters(), training.gradient_clip
+            model.parameters(), training.gradient_clip, error_if_nonfinite=True
         )
+        if gradient_norm > 100 * training.gradient_clip:
+            raise FloatingPointError(
+                f"Gradient norm {gradient_norm.item():.3g} at step {step}"
+            )
         optimizer.step()
         scheduler.step()
         update_ema(ema, model, training.ema_decay)
@@ -320,6 +352,17 @@ def main() -> None:
                     },
                 }
             )
+            validation = min(model_metrics["loss"], ema_metrics["loss"])
+            if validation < best_validation:
+                best_validation = validation
+                save_weights(
+                    args.output / "best.pt",
+                    model,
+                    ema,
+                    step,
+                    configuration,
+                    best_validation,
+                )
             model.train()
             last_log = time.perf_counter()
         if step % training.checkpoint_every == 0 or step == steps:
@@ -331,6 +374,7 @@ def main() -> None:
                 scheduler,
                 step,
                 configuration,
+                best_validation,
             )
         if tracking and tracking_metrics:
             tracking.log(tracking_metrics, step=step)

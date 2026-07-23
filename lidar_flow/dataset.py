@@ -198,6 +198,22 @@ class CompletionDataset(Dataset[dict[str, np.ndarray]]):
         pose = sample["object_from_sensors"][view]
         directions = self.ray_directions[ray_indices] @ pose[:3, :3].T
         points = pose[:3, 3] + directions * ranges[:, None]
+        sensor_position = pose[:3, 3]
+        sensor_forward = pose[:3, 2]
+        surface = sample["surface_points"]
+
+        if self.training:
+            yaw = np.random.uniform(0.0, 2.0 * np.pi)
+            cosine, sine = np.cos(yaw), np.sin(yaw)
+            rotation = np.array(
+                ((cosine, -sine, 0.0), (sine, cosine, 0.0), (0.0, 0.0, 1.0)),
+                dtype=np.float32,
+            )
+            points = points @ rotation.T
+            directions = directions @ rotation.T
+            sensor_position = sensor_position @ rotation.T
+            sensor_forward = sensor_forward @ rotation.T
+            surface = surface @ rotation.T
 
         selected = self._indices(len(points), self.condition_points)
         observed_features = np.zeros((self.condition_points, 10), dtype=np.float32)
@@ -210,18 +226,17 @@ class CompletionDataset(Dataset[dict[str, np.ndarray]]):
                 points[selected],
                 directions[selected],
                 ranges[selected, None],
-                points[selected] - pose[:3, 3],
+                points[selected] - sensor_position,
             ),
             axis=1,
         )
         observed_mask[:count] = True
 
-        surface = sample["surface_points"]
         target_indices = self._indices(len(surface), self.target_points)
         sensor_features = np.concatenate(
             (
-                pose[:3, 3],
-                pose[:3, 2],
+                sensor_position,
+                sensor_forward,
                 np.array(
                     [
                         len(points) / len(self.ray_directions),

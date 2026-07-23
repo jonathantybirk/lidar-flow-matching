@@ -9,6 +9,7 @@ from torch.utils.data import default_collate
 from lidar_flow.config import ModelConfig
 from lidar_flow.dataset import CompletionDataset
 from lidar_flow.flow import sample
+from lidar_flow.geometry import points_from_scan
 from lidar_flow.model import PointFlowTransformer
 from lidar_flow.visualize import set_equal_axes
 from train import device, move
@@ -19,7 +20,7 @@ ROOT = Path(__file__).parent
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sample validation completions")
     parser.add_argument("checkpoint", type=Path)
-    parser.add_argument("--data", type=Path, default=ROOT / "data/processed/03001627")
+    parser.add_argument("--data", type=Path, default=ROOT / "data/processed/02958343")
     parser.add_argument("--index", type=int, default=0)
     parser.add_argument("--samples", type=int, default=4)
     parser.add_argument("--steps", type=int, default=8)
@@ -47,7 +48,15 @@ def main() -> None:
         if name != "target"
     }
     generated = sample(model, repeated, steps=args.steps).cpu().numpy()
-    observed = batch["observed_xyz"][0, batch["observed_mask"][0]].numpy()
+    sample_path, view = dataset.items[args.index]
+    with np.load(sample_path) as stored:
+        start, end = stored["scan_offsets"][view : view + 2]
+        observed = points_from_scan(
+            stored["ranges"][start:end],
+            stored["ray_indices"][start:end],
+            dataset.ray_directions,
+            stored["object_from_sensors"][view],
+        )
     sensor = batch["sensor_features"][0, :3].numpy()
     forward = batch["sensor_features"][0, 3:6].numpy()
     target = batch["target"][0].numpy()
@@ -75,7 +84,7 @@ def main() -> None:
         color="tab:red",
         arrow_length_ratio=0.22,
     )
-    axis.set_title("LiDAR observation")
+    axis.set_title(f"Complete LiDAR observation ({len(observed)} returns)")
     set_equal_axes(axis, bounds)
     for index, completion in enumerate(generated, start=1):
         axis = figure.add_subplot(1, args.samples + 1, index + 1, projection="3d")

@@ -16,11 +16,11 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
 job_data=$(mktemp -d "/tmp/lidar-flow-${LSB_JOBID}.XXXXXX")
 trap 'rm -rf "$job_data"' EXIT
-cp -a data/processed/03001627 "$job_data/"
+cp -a data/processed/02958343 "$job_data/"
 
 uv run python train.py \
-    --data "$job_data/03001627" \
-    --output "${OUTPUT:-runs/chairs}" \
-    --batch-size "${BATCH_SIZE:-128}" \
+    --data "$job_data/02958343" \
+    --output "${OUTPUT:-runs/cars}" \
+    --batch-size "${BATCH_SIZE:-64}" \
     --steps "${STEPS:-100000}" \
-    --run "${RUN_NAME:-chairs-a100}"
+    --run "${RUN_NAME:-cars-a100}"

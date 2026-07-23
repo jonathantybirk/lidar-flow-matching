@@ -3,13 +3,13 @@ reservoir_points = 8192
 target_points = 1024
 
 [sensor]
-height = 96
-width = 96
+height = 32
+width = 32
 horizontal_fov_degrees = 60.0
 vertical_fov_degrees = 60.0
 distance = 2.25
-minimum_elevation_degrees = -20.0
-maximum_elevation_degrees = 30.0
+minimum_elevation_degrees = -10.0
+maximum_elevation_degrees = 15.0
 
 [dataset]
 training_views = 32
