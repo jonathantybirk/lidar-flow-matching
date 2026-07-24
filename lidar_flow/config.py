@@ -5,8 +5,9 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class SurfaceConfig:
-    reservoir_points: int
+    candidate_points: int
     target_points: int
+    normal_weight: float
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,8 @@ class TrainingConfig:
     validate_every: int
     checkpoint_every: int
     validation_batches: int
+    early_stopping_patience: int
+    early_stopping_min_delta: float
     seed: int
 
 

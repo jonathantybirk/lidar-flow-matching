@@ -22,6 +22,15 @@ def surface_centroid(mesh: trimesh.Trimesh) -> FloatArray:
     return np.average(face_centroids, axis=0, weights=mesh.area_faces)
 
 
+def clean_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    cleaned = mesh.copy()
+    cleaned.merge_vertices(merge_tex=True, merge_norm=True)
+    cleaned.update_faces(cleaned.nondegenerate_faces())
+    cleaned.update_faces(cleaned.unique_faces())
+    cleaned.remove_unreferenced_vertices()
+    return cleaned
+
+
 def normalize_mesh(mesh: trimesh.Trimesh) -> NormalizedMesh:
     centroid = surface_centroid(mesh)
     centered_vertices = mesh.vertices - centroid
@@ -43,17 +52,35 @@ def normalize_mesh(mesh: trimesh.Trimesh) -> NormalizedMesh:
 
 
 def sample_surface(
-    mesh: trimesh.Trimesh, count: int, rng: np.random.Generator
+    mesh: trimesh.Trimesh,
+    candidate_count: int,
+    count: int,
+    normal_weight: float,
+    rng: np.random.Generator,
 ) -> FloatArray:
     face_indices = rng.choice(
-        len(mesh.faces), size=count, p=mesh.area_faces / mesh.area
+        len(mesh.faces), size=candidate_count, p=mesh.area_faces / mesh.area
     )
     triangles = mesh.triangles[face_indices]
 
-    u = np.sqrt(rng.random(count))
-    v = rng.random(count)
+    u = np.sqrt(rng.random(candidate_count))
+    v = rng.random(candidate_count)
     weights = np.column_stack((1.0 - u, u * (1.0 - v), u * v))
-    return np.einsum("ni,nij->nj", weights, triangles)
+    points = np.einsum("ni,nij->nj", weights, triangles).astype(np.float32)
+    features = np.concatenate(
+        (points, normal_weight * mesh.face_normals[face_indices]), axis=1
+    ).astype(np.float32)
+
+    selected = np.empty(count, dtype=np.int64)
+    selected[0] = np.linalg.norm(points - points.mean(axis=0), axis=1).argmax()
+    distances = np.full(candidate_count, np.inf, dtype=np.float32)
+    for index in range(1, count):
+        offset = features - features[selected[index - 1]]
+        distances = np.minimum(
+            distances, np.einsum("ij,ij->i", offset, offset)
+        )
+        selected[index] = distances.argmax()
+    return points[selected]
 
 
 def _look_at_origin(sensor_position: FloatArray) -> FloatArray:

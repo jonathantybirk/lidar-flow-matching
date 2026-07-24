@@ -29,3 +29,4 @@ def download_synset(
         if limit is not None:
             members = members[:limit]
         zip_file.extractall(raw_directory, members)
+    archive.unlink()

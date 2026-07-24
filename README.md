@@ -5,10 +5,11 @@ LiDAR observation and its sensor pose.
 
 ## Data
 
-The data pipeline uses cars from ShapeNetCore (`02958343`). Meshes are split
-80/10/10 by model before observations are generated. Each processed mesh stores:
+The data pipeline uses buses, cars, motorcycles, and trains from ShapeNetCore.
+Each category is split 80/10/10 by model before observations are generated.
+Each processed mesh stores:
 
-- 8,192 area-weighted surface points;
+- 2,048 surface points selected for spatial and normal coverage;
 - 32 training views or 20 fixed evaluation views;
 - packed ray indices, ranges, and a sensor transform for each view.
 
@@ -33,15 +34,15 @@ ShapeNetCore access must be approved at
 ## Preprocessing
 
 ```bash
-uv run python prepare_data.py download 02958343
-uv run python prepare_data.py generate 02958343
+uv run python prepare_data.py download 02924116 02958343 03790512 04468005
+uv run python prepare_data.py generate vehicles 02924116 02958343 03790512 04468005
 ```
 
-Processed data is written to `data/processed/02958343`. Inspect a generated
+Processed data is written to `data/processed/vehicles`. Inspect a generated
 sample with:
 
 ```bash
-uv run python prepare_data.py inspect 02958343 <MODEL_ID> --view 0 --show
+uv run python prepare_data.py inspect vehicles 02958343 <MODEL_ID> --view 0 --show
 ```
 
 `data/` and `artifacts/` are local and excluded from Git.
@@ -49,16 +50,16 @@ uv run python prepare_data.py inspect 02958343 <MODEL_ID> --view 0 --show
 ## Training
 
 Training uses the train and validation splits. Configuration and checkpoints are
-written to `runs/cars`.
+written to `runs/vehicles`.
 
 ```bash
-uv run python train.py --run cars-a100
+uv run python train.py --run vehicles-a100
 ```
 
 Generate validation completions from a checkpoint with:
 
 ```bash
-uv run python sample.py runs/cars/best.pt
+uv run python sample.py runs/vehicles/best.pt
 ```
 
 On DTU HPC, submit with `mkdir -p runs && bsub < train.lsf`. `STEPS`,

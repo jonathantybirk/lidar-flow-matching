@@ -20,7 +20,7 @@ ROOT = Path(__file__).parent
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sample validation completions")
     parser.add_argument("checkpoint", type=Path)
-    parser.add_argument("--data", type=Path, default=ROOT / "data/processed/02958343")
+    parser.add_argument("--data", type=Path, default=ROOT / "data/processed/vehicles")
     parser.add_argument("--index", type=int, default=0)
     parser.add_argument("--samples", type=int, default=4)
     parser.add_argument("--steps", type=int, default=8)

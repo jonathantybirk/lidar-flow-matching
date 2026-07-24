@@ -12,6 +12,7 @@ from torch.utils.data import Dataset
 
 from lidar_flow.config import DataConfig
 from lidar_flow.geometry import (
+    clean_mesh,
     make_ray_directions,
     normalize_mesh,
     sample_sensor_poses,
@@ -20,18 +21,33 @@ from lidar_flow.geometry import (
 )
 
 
-def discover_meshes(raw_synset_directory: Path) -> list[Path]:
-    return sorted(raw_synset_directory.glob("**/models/model_normalized.obj"))
+def discover_meshes(raw_directories: list[Path]) -> list[Path]:
+    return sorted(
+        path
+        for directory in raw_directories
+        for path in directory.glob("**/models/model_normalized.obj")
+    )
+
+
+def _synset(mesh_path: Path) -> str:
+    return mesh_path.parents[2].name
 
 
 def split_meshes(mesh_paths: list[Path], config: DataConfig) -> list[tuple[Path, str]]:
-    shuffled = np.random.default_rng(config.dataset.seed).permutation(len(mesh_paths))
-    validation_count = round(len(mesh_paths) * config.dataset.validation_fraction)
-    test_count = round(len(mesh_paths) * config.dataset.test_fraction)
-    splits = np.full(len(mesh_paths), "train", dtype=object)
-    splits[shuffled[:validation_count]] = "validation"
-    splits[shuffled[validation_count : validation_count + test_count]] = "test"
-    return list(zip(mesh_paths, splits.tolist(), strict=True))
+    rng = np.random.default_rng(config.dataset.seed)
+    items: list[tuple[Path, str]] = []
+    for synset in sorted({_synset(path) for path in mesh_paths}):
+        category = [path for path in mesh_paths if _synset(path) == synset]
+        shuffled = rng.permutation(len(category))
+        validation_count = round(
+            len(category) * config.dataset.validation_fraction
+        )
+        test_count = round(len(category) * config.dataset.test_fraction)
+        splits = np.full(len(category), "train", dtype=object)
+        splits[shuffled[:validation_count]] = "validation"
+        splits[shuffled[validation_count : validation_count + test_count]] = "test"
+        items.extend(zip(category, splits.tolist(), strict=True))
+    return items
 
 
 def _mesh_seed(seed: int, model_id: str) -> int:
@@ -44,11 +60,17 @@ def _generate_sample(
 ) -> tuple[str, str, dict[str, np.ndarray]]:
     mesh_path, split = item
     model_id = mesh_path.parents[1].name
-    rng = np.random.default_rng(_mesh_seed(config.dataset.seed, model_id))
+    synset = _synset(mesh_path)
+    sample_id = f"{synset}_{model_id}"
+    rng = np.random.default_rng(_mesh_seed(config.dataset.seed, sample_id))
     mesh = trimesh.load_mesh(mesh_path, force="mesh", process=False)
-    normalized = normalize_mesh(mesh)
+    normalized = normalize_mesh(clean_mesh(mesh))
     surface_points = sample_surface(
-        normalized.mesh, config.surface.reservoir_points, rng
+        normalized.mesh,
+        config.surface.candidate_points,
+        config.surface.target_points,
+        config.surface.normal_weight,
+        rng,
     ).astype(np.float32)
     view_count = (
         config.dataset.training_views
@@ -64,7 +86,7 @@ def _generate_sample(
     )
     scans = [simulate_scan(normalized.mesh, pose, sensor_directions) for pose in poses]
     if any(len(ranges) == 0 for _, ranges in scans):
-        raise ValueError(f"A sensor view missed mesh {model_id}")
+        raise ValueError(f"A sensor view missed mesh {sample_id}")
     counts = np.fromiter((len(ranges) for _, ranges in scans), dtype=np.int32)
     arrays = {
         "surface_points": surface_points,
@@ -74,7 +96,7 @@ def _generate_sample(
         "ranges": np.concatenate([ranges for _, ranges in scans]),
         "object_from_sensors": poses.astype(np.float32),
     }
-    return model_id, split, arrays
+    return sample_id, split, arrays
 
 
 def _samples(
@@ -112,6 +134,7 @@ def generate_dataset(
             for section in ("surface", "sensor", "dataset")
         },
         "meshes": len(mesh_paths),
+        "synsets": sorted({_synset(path) for path in mesh_paths}),
     }
     (output_directory / "metadata.json").write_text(
         json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
@@ -129,6 +152,7 @@ def generate_dataset(
                 json.dumps(
                     {
                         "model_id": model_id,
+                        "synset": model_id.split("_", 1)[0],
                         "sample": sample_path.name,
                         "split": split,
                         "views": len(arrays["object_from_sensors"]),

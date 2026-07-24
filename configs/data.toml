@@ -1,6 +1,7 @@
 [surface]
-reservoir_points = 8192
-target_points = 1024
+candidate_points = 16384
+target_points = 2048
+normal_weight = 0.05
 
 [sensor]
 height = 32

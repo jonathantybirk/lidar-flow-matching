@@ -1,7 +1,7 @@
 # Model design
 
-The model learns a conditional distribution of 1,024-point car surfaces from
-one LiDAR scan and its sensor pose.
+The model learns a conditional distribution of 2,048-point ground-vehicle
+surfaces from one LiDAR scan and its sensor pose.
 
 | Choice | Basis |
 |---|---|
@@ -21,5 +21,6 @@ point. Training uses flow regression, symmetric Chamfer distance, and one-sided
 agreement with measured points. Sampling uses eight Heun steps.
 
 The model has 26.8 million parameters at width 256. AdamW uses a cosine schedule,
-bfloat16 arithmetic, gradient clipping, and an exponential moving average. The
-default run contains 100,000 updates with batch size 64 on one A100.
+bfloat16 arithmetic, gradient clipping, and an exponential moving average.
+Training preserves the best EMA checkpoint and stops after 30,000 steps without
+a meaningful EMA validation improvement.

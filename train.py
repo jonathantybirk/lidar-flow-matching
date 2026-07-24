@@ -26,9 +26,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train LiDAR point completion")
     parser.add_argument("--config", type=Path, default=ROOT / "configs" / "train.toml")
     parser.add_argument(
-        "--data", type=Path, default=ROOT / "data" / "processed" / "02958343"
+        "--data", type=Path, default=ROOT / "data" / "processed" / "vehicles"
     )
-    parser.add_argument("--output", type=Path, default=ROOT / "runs" / "cars")
+    parser.add_argument("--output", type=Path, default=ROOT / "runs" / "vehicles")
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--steps", type=int)
@@ -111,6 +111,8 @@ def save_checkpoint(
     step: int,
     config: dict,
     best_validation: float,
+    early_stopping_reference: float,
+    last_improvement: int,
 ) -> None:
     temporary = path.with_suffix(".tmp")
     torch.save(
@@ -122,6 +124,8 @@ def save_checkpoint(
             "step": step,
             "config": config,
             "best_validation": best_validation,
+            "early_stopping_reference": early_stopping_reference,
+            "last_improvement": last_improvement,
         },
         temporary,
     )
@@ -203,6 +207,8 @@ def main() -> None:
     )
     start = 0
     best_validation = float("inf")
+    early_stopping_reference = float("inf")
+    last_improvement = 0
     if args.resume:
         checkpoint = torch.load(
             args.resume, map_location=target_device, weights_only=True
@@ -213,6 +219,10 @@ def main() -> None:
         scheduler.load_state_dict(checkpoint["scheduler"])
         start = checkpoint["step"]
         best_validation = checkpoint.get("best_validation", best_validation)
+        early_stopping_reference = checkpoint.get(
+            "early_stopping_reference", best_validation
+        )
+        last_improvement = checkpoint.get("last_improvement", start)
 
     training_values = asdict(config.training)
     training_values.update(batch_size=batch_size, steps=steps, workers=workers)
@@ -243,6 +253,7 @@ def main() -> None:
         disable=not sys.stderr.isatty(),
     )
     for step in progress:
+        stop = False
         tracking_metrics = {}
         try:
             batch = next(iterator)
@@ -352,7 +363,7 @@ def main() -> None:
                     },
                 }
             )
-            validation = min(model_metrics["loss"], ema_metrics["loss"])
+            validation = ema_metrics["loss"]
             if validation < best_validation:
                 best_validation = validation
                 save_weights(
@@ -363,9 +374,28 @@ def main() -> None:
                     configuration,
                     best_validation,
                 )
+            if (
+                validation
+                < early_stopping_reference - training.early_stopping_min_delta
+            ):
+                early_stopping_reference = validation
+                last_improvement = step
+            elif step - last_improvement >= training.early_stopping_patience:
+                progress.write(
+                    json.dumps(
+                        {
+                            "step": step,
+                            "early_stopping": {
+                                "best_ema_validation": best_validation,
+                                "last_meaningful_improvement": last_improvement,
+                            },
+                        }
+                    )
+                )
+                stop = True
             model.train()
             last_log = time.perf_counter()
-        if step % training.checkpoint_every == 0 or step == steps:
+        if step % training.checkpoint_every == 0 or step == steps or stop:
             save_checkpoint(
                 args.output / "checkpoint.pt",
                 model,
@@ -375,9 +405,13 @@ def main() -> None:
                 step,
                 configuration,
                 best_validation,
+                early_stopping_reference,
+                last_improvement,
             )
         if tracking and tracking_metrics:
             tracking.log(tracking_metrics, step=step)
+        if stop:
+            break
     if tracking:
         tracking.finish()
 

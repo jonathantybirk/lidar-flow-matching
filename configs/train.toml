@@ -1,5 +1,5 @@
 [model]
-points = 1024
+points = 2048
 condition_points = 256
 width = 256
 heads = 8
@@ -9,7 +9,7 @@ neighbors = 16
 
 [training]
 batch_size = 64
-steps = 100000
+steps = 240000
 learning_rate = 0.0002
 minimum_learning_rate = 0.00002
 warmup_steps = 2000
@@ -23,4 +23,6 @@ log_every = 50
 validate_every = 2500
 checkpoint_every = 2500
 validation_batches = 32
+early_stopping_patience = 30000
+early_stopping_min_delta = 0.00001
 seed = 42

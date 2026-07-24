@@ -3,7 +3,7 @@
 #BSUB -J lidar-flow
 #BSUB -n 8
 #BSUB -gpu "num=1:mode=exclusive_process"
-#BSUB -W 14:00
+#BSUB -W 24:00
 #BSUB -R "span[hosts=1] rusage[mem=4GB]"
 #BSUB -o runs/%J.log
 
@@ -16,11 +16,11 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
 job_data=$(mktemp -d "/tmp/lidar-flow-${LSB_JOBID}.XXXXXX")
 trap 'rm -rf "$job_data"' EXIT
-cp -a data/processed/02958343 "$job_data/"
+cp -a data/processed/vehicles "$job_data/"
 
 uv run python train.py \
-    --data "$job_data/02958343" \
-    --output "${OUTPUT:-runs/cars}" \
+    --data "$job_data/vehicles" \
+    --output "${OUTPUT:-runs/vehicles}" \
     --batch-size "${BATCH_SIZE:-64}" \
-    --steps "${STEPS:-100000}" \
-    --run "${RUN_NAME:-cars-a100}"
+    --steps "${STEPS:-240000}" \
+    --run "${RUN_NAME:-vehicles-a100}"

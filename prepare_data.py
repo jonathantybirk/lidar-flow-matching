@@ -17,17 +17,19 @@ def parse_args() -> argparse.Namespace:
     commands = parser.add_subparsers(dest="command", required=True)
 
     download = commands.add_parser("download", help="Download a ShapeNet synset")
-    download.add_argument("synset")
+    download.add_argument("synsets", nargs="+")
     download.add_argument("--limit", type=int)
 
     generate = commands.add_parser("generate", help="Generate LiDAR observations")
-    generate.add_argument("synset")
+    generate.add_argument("dataset")
+    generate.add_argument("synsets", nargs="+")
     generate.add_argument("--limit", type=int)
     generate.add_argument(
         "--workers", type=int, default=max(1, (os.cpu_count() or 2) // 2)
     )
 
     inspect = commands.add_parser("inspect", help="Visualize one generated example")
+    inspect.add_argument("dataset")
     inspect.add_argument("synset")
     inspect.add_argument("model_id")
     inspect.add_argument("--view", type=int, default=0)
@@ -40,24 +42,27 @@ def main() -> None:
     args = parse_args()
 
     if args.command == "download":
-        download_synset(args.synset, DATA, args.limit)
+        for synset in args.synsets:
+            download_synset(synset, DATA, args.limit)
 
     elif args.command == "generate":
-        meshes = discover_meshes(DATA / "raw" / args.synset)
+        meshes = discover_meshes(
+            [DATA / "raw" / synset for synset in args.synsets]
+        )
         if args.limit is not None:
             meshes = meshes[: args.limit]
         if not meshes:
-            raise ValueError(f"No ShapeNet meshes found for synset {args.synset}")
+            raise ValueError("No ShapeNet meshes found")
 
         generate_dataset(
             meshes,
-            DATA / "processed" / args.synset,
+            DATA / "processed" / args.dataset,
             load_data_config(CONFIG),
             args.workers,
         )
 
     elif args.command == "inspect":
-        processed_directory = DATA / "processed" / args.synset
+        processed_directory = DATA / "processed" / args.dataset
         save_inspection_figure(
             DATA
             / "raw"
@@ -66,7 +71,7 @@ def main() -> None:
             / args.model_id
             / "models"
             / "model_normalized.obj",
-            processed_directory / f"{args.model_id}.npz",
+            processed_directory / f"{args.synset}_{args.model_id}.npz",
             processed_directory / "ray_directions.npy",
             args.view,
             load_data_config(CONFIG).surface.target_points,
