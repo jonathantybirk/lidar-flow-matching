@@ -1,8 +1,8 @@
 import json
+from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
 from hashlib import blake2b
-from collections import OrderedDict
 from pathlib import Path
 from typing import Iterator
 
@@ -16,7 +16,6 @@ from lidar_flow.geometry import (
     make_ray_directions,
     normalize_mesh,
     sample_sensor_poses,
-    sample_surface,
     simulate_scan,
 )
 
@@ -65,13 +64,6 @@ def _generate_sample(
     rng = np.random.default_rng(_mesh_seed(config.dataset.seed, sample_id))
     mesh = trimesh.load_mesh(mesh_path, force="mesh", process=False)
     normalized = normalize_mesh(clean_mesh(mesh))
-    surface_points = sample_surface(
-        normalized.mesh,
-        config.surface.candidate_points,
-        config.surface.target_points,
-        config.surface.normal_weight,
-        rng,
-    ).astype(np.float32)
     view_count = (
         config.dataset.training_views
         if split == "train"
@@ -89,7 +81,6 @@ def _generate_sample(
         raise ValueError(f"A sensor view missed mesh {sample_id}")
     counts = np.fromiter((len(ranges) for _, ranges in scans), dtype=np.int32)
     arrays = {
-        "surface_points": surface_points,
         "object_from_original": normalized.object_from_original,
         "scan_offsets": np.concatenate(([0], np.cumsum(counts))).astype(np.int32),
         "ray_indices": np.concatenate([indices for indices, _ in scans]),
@@ -125,13 +116,13 @@ def generate_dataset(
     if output_directory.exists():
         raise FileExistsError(f"Dataset already exists: {output_directory}")
 
-    output_directory.mkdir(parents=True, exist_ok=True)
+    output_directory.mkdir(parents=True)
     sensor_directions = make_ray_directions(config.sensor).astype(np.float32)
     np.save(output_directory / "ray_directions.npy", sensor_directions)
     metadata = {
         "config": {
             section: asdict(getattr(config, section))
-            for section in ("surface", "sensor", "dataset")
+            for section in ("sensor", "dataset")
         },
         "meshes": len(mesh_paths),
         "synsets": sorted({_synset(path) for path in mesh_paths}),
@@ -141,8 +132,9 @@ def generate_dataset(
     )
 
     items = split_meshes(mesh_paths, config)
-    manifest_path = output_directory / "manifest.jsonl"
-    with manifest_path.open("w", encoding="utf-8") as manifest:
+    with (output_directory / "manifest.jsonl").open(
+        "w", encoding="utf-8"
+    ) as manifest:
         for index, (model_id, split, arrays) in enumerate(
             _samples(items, config, sensor_directions, workers), start=1
         ):
@@ -164,30 +156,28 @@ def generate_dataset(
                 print(f"Generated {index}/{len(items)} meshes", flush=True)
 
 
-class CompletionDataset(Dataset[dict[str, np.ndarray]]):
+class ViewDataset(Dataset[dict[str, np.ndarray]]):
     def __init__(
         self,
         directory: Path,
         split: str,
-        condition_points: int,
-        target_points: int,
         cache_size: int = 16,
     ) -> None:
-        if split not in {"train", "validation"}:
-            raise ValueError("Training code exposes only train and validation splits")
         rows = [
             json.loads(line)
             for line in (directory / "manifest.jsonl").read_text().splitlines()
         ]
         self.items = [
-            (directory / row["sample"], view)
+            (directory / row["sample"], source, row["views"])
             for row in rows
             if row["split"] == split
-            for view in range(row["views"])
+            for source in range(row["views"])
         ]
-        self.ray_directions = np.load(directory / "ray_directions.npy").reshape(-1, 3)
-        self.condition_points = condition_points
-        self.target_points = target_points
+        self.ray_directions = np.load(directory / "ray_directions.npy")
+        metadata = json.loads((directory / "metadata.json").read_text())
+        sensor = metadata["config"]["sensor"]
+        self.range_center = np.float32(sensor["distance"])
+        self.range_scale = np.float32(1.0)
         self.training = split == "train"
         self.cache_size = cache_size
         self.cache: OrderedDict[Path, dict[str, np.ndarray]] = OrderedDict()
@@ -200,81 +190,52 @@ class CompletionDataset(Dataset[dict[str, np.ndarray]]):
             self.cache.move_to_end(path)
             return self.cache[path]
         with np.load(path) as file:
-            sample = {name: file[name] for name in file.files}
+            sample = {
+                name: file[name]
+                for name in (
+                    "scan_offsets",
+                    "ray_indices",
+                    "ranges",
+                    "object_from_sensors",
+                )
+            }
         self.cache[path] = sample
         if len(self.cache) > self.cache_size:
             self.cache.popitem(last=False)
         return sample
 
-    def _indices(self, count: int, size: int) -> np.ndarray:
-        if count <= size:
-            return np.arange(count)
-        if self.training:
-            return np.random.choice(count, size=size, replace=False)
-        return np.linspace(0, count - 1, size, dtype=np.int64)
+    def scan_state(self, sample: dict[str, np.ndarray], view: int) -> np.ndarray:
+        start, end = sample["scan_offsets"][view : view + 2]
+        indices = sample["ray_indices"][start:end]
+        ranges = sample["ranges"][start:end]
+        height, width = self.ray_directions.shape[:2]
+        state = np.zeros((2, height * width), dtype=np.float32)
+        state[0] = -1.0
+        state[0, indices] = 1.0
+        state[1, indices] = (ranges - self.range_center) / self.range_scale
+        return state.reshape(2, height, width)
 
     def __getitem__(self, index: int) -> dict[str, np.ndarray]:
-        path, view = self.items[index]
+        path, source_view, views = self.items[index]
         sample = self._load(path)
-        start, end = sample["scan_offsets"][view : view + 2]
-        ranges = sample["ranges"][start:end]
-        ray_indices = sample["ray_indices"][start:end]
-        pose = sample["object_from_sensors"][view]
-        directions = self.ray_directions[ray_indices] @ pose[:3, :3].T
-        points = pose[:3, 3] + directions * ranges[:, None]
-        sensor_position = pose[:3, 3]
-        sensor_forward = pose[:3, 2]
-        surface = sample["surface_points"]
-
         if self.training:
-            yaw = np.random.uniform(0.0, 2.0 * np.pi)
-            cosine, sine = np.cos(yaw), np.sin(yaw)
-            rotation = np.array(
-                ((cosine, -sine, 0.0), (sine, cosine, 0.0), (0.0, 0.0, 1.0)),
-                dtype=np.float32,
-            )
-            points = points @ rotation.T
-            directions = directions @ rotation.T
-            sensor_position = sensor_position @ rotation.T
-            sensor_forward = sensor_forward @ rotation.T
-            surface = surface @ rotation.T
+            target_view = np.random.randint(views - 1)
+            target_view += target_view >= source_view
+        else:
+            target_view = (source_view + 1 + views // 3) % views
 
-        selected = self._indices(len(points), self.condition_points)
-        observed_features = np.zeros((self.condition_points, 10), dtype=np.float32)
-        observed_xyz = np.zeros((self.condition_points, 3), dtype=np.float32)
-        observed_mask = np.zeros(self.condition_points, dtype=np.bool_)
-        count = len(selected)
-        observed_xyz[:count] = points[selected]
-        observed_features[:count] = np.concatenate(
-            (
-                points[selected],
-                directions[selected],
-                ranges[selected, None],
-                points[selected] - sensor_position,
-            ),
-            axis=1,
+        source_pose = sample["object_from_sensors"][source_view]
+        target_pose = sample["object_from_sensors"][target_view]
+        source_rotation = source_pose[:3, :3]
+        relative_rotation = source_rotation.T @ target_pose[:3, :3]
+        relative_translation = source_rotation.T @ (
+            target_pose[:3, 3] - source_pose[:3, 3]
         )
-        observed_mask[:count] = True
-
-        target_indices = self._indices(len(surface), self.target_points)
-        sensor_features = np.concatenate(
-            (
-                sensor_position,
-                sensor_forward,
-                np.array(
-                    [
-                        len(points) / len(self.ray_directions),
-                        ranges.mean(),
-                        ranges.std(),
-                    ],
-                    dtype=np.float32,
-                ),
-            )
+        action = np.concatenate(
+            (relative_rotation.reshape(-1), relative_translation)
         ).astype(np.float32)
         return {
-            "observed_features": observed_features,
-            "observed_xyz": observed_xyz,
-            "observed_mask": observed_mask,
-            "sensor_features": sensor_features,
-            "target": surface[target_indices].astype(np.float32),
+            "current": self.scan_state(sample, source_view),
+            "target": self.scan_state(sample, target_view),
+            "action": action,
         }

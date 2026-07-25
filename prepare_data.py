@@ -74,7 +74,6 @@ def main() -> None:
             processed_directory / f"{args.synset}_{args.model_id}.npz",
             processed_directory / "ray_directions.npy",
             args.view,
-            load_data_config(CONFIG).surface.target_points,
             ROOT / "artifacts" / "inspection" / f"{args.model_id}_{args.view:04d}.png",
             show=args.show,
         )

@@ -4,13 +4,6 @@ from pathlib import Path
 
 
 @dataclass(frozen=True)
-class SurfaceConfig:
-    candidate_points: int
-    target_points: int
-    normal_weight: float
-
-
-@dataclass(frozen=True)
 class SensorConfig:
     height: int
     width: int
@@ -32,20 +25,17 @@ class DatasetConfig:
 
 @dataclass(frozen=True)
 class DataConfig:
-    surface: SurfaceConfig
     sensor: SensorConfig
     dataset: DatasetConfig
 
 
 @dataclass(frozen=True)
 class ModelConfig:
-    points: int
-    condition_points: int
+    patch_size: int
     width: int
     heads: int
     condition_layers: int
     flow_layers: int
-    neighbors: int
 
 
 @dataclass(frozen=True)
@@ -55,16 +45,16 @@ class TrainingConfig:
     learning_rate: float
     minimum_learning_rate: float
     warmup_steps: int
+    decay_steps: int
     weight_decay: float
     gradient_clip: float
-    chamfer_weight: float
-    observation_weight: float
     ema_decay: float
     workers: int
     log_every: int
     validate_every: int
     checkpoint_every: int
     validation_batches: int
+    sampling_steps: int
     early_stopping_patience: int
     early_stopping_min_delta: float
     seed: int
@@ -81,7 +71,6 @@ def load_data_config(path: Path) -> DataConfig:
         values = tomllib.load(file)
 
     return DataConfig(
-        surface=SurfaceConfig(**values["surface"]),
         sensor=SensorConfig(**values["sensor"]),
         dataset=DatasetConfig(**values["dataset"]),
     )

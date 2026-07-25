@@ -1,8 +1,3 @@
-[surface]
-candidate_points = 16384
-target_points = 2048
-normal_weight = 0.05
-
 [sensor]
 height = 32
 width = 32

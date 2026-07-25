@@ -26,32 +26,38 @@ def save_inspection_figure(
     sample_path: Path,
     ray_directions_path: Path,
     view_index: int,
-    target_points: int,
     output_path: Path,
     show: bool = False,
 ) -> None:
     with np.load(sample_path) as sample:
-        complete_points = sample["surface_points"][:target_points]
         object_from_original = sample["object_from_original"]
         start, end = sample["scan_offsets"][view_index : view_index + 2]
-        ranges = sample["ranges"][start:end]
-        ray_indices = sample["ray_indices"][start:end]
-        object_from_sensor = sample["object_from_sensors"][view_index]
+        next_view = (view_index + 1 + len(sample["object_from_sensors"]) // 3) % len(
+            sample["object_from_sensors"]
+        )
+        next_start, next_end = sample["scan_offsets"][next_view : next_view + 2]
+        first_pose = sample["object_from_sensors"][view_index]
+        second_pose = sample["object_from_sensors"][next_view]
+        first_ranges = sample["ranges"][start:end]
+        first_indices = sample["ray_indices"][start:end]
+        second_ranges = sample["ranges"][next_start:next_end]
+        second_indices = sample["ray_indices"][next_start:next_end]
     sensor_directions = np.load(ray_directions_path)
-    partial_points = points_from_scan(
-        ranges, ray_indices, sensor_directions, object_from_sensor
+    first_points = points_from_scan(
+        first_ranges, first_indices, sensor_directions, first_pose
+    )
+    second_points = points_from_scan(
+        second_ranges, second_indices, sensor_directions, second_pose
     )
 
     mesh = trimesh.load_mesh(mesh_path, force="mesh", process=False)
     mesh.apply_transform(object_from_original)
 
     mesh_vertices = mesh.vertices
-    sensor_position = object_from_sensor[:3, 3]
-
     figure = plt.figure(figsize=(18, 5))
     mesh_axis = figure.add_subplot(131, projection="3d")
-    complete_axis = figure.add_subplot(132, projection="3d")
-    observation_axis = figure.add_subplot(133, projection="3d")
+    first_axis = figure.add_subplot(132, projection="3d")
+    second_axis = figure.add_subplot(133, projection="3d")
 
     mesh_axis.add_collection3d(
         Poly3DCollection(
@@ -64,39 +70,34 @@ def save_inspection_figure(
     )
     mesh_axis.set_title(f"Original mesh ({len(mesh.faces)} faces)")
 
-    complete_axis.scatter(*complete_points.T, s=6, color="tab:blue", alpha=0.9)
-    complete_axis.set_title(f"Complete surface ({len(complete_points)} points)")
+    for axis, points, pose, title, color in (
+        (first_axis, first_points, first_pose, "Current", "tab:orange"),
+        (second_axis, second_points, second_pose, "Target", "tab:blue"),
+    ):
+        position = pose[:3, 3]
+        forward = pose[:3, 2]
+        axis.scatter(*points.T, s=9, color=color)
+        axis.scatter(*position, s=90, color="tab:red")
+        axis.quiver(
+            *position,
+            *forward,
+            length=0.45,
+            color="tab:red",
+            arrow_length_ratio=0.2,
+        )
+        axis.set_title(f"{title} observation ({len(points)} returns)")
 
-    observation_axis.scatter(
-        *partial_points.T,
-        s=9,
-        color="tab:orange",
-        label=f"observed ({len(partial_points)})",
-    )
-    observation_axis.scatter(
-        *sensor_position,
-        s=90,
-        color="tab:red",
-        label="sensor",
-    )
-
-    forward = object_from_sensor[:3, 2]
-    observation_axis.quiver(
-        *sensor_position,
-        *forward,
-        length=0.45,
-        color="tab:red",
-        arrow_length_ratio=0.2,
-    )
-    observation_axis.set_title("LiDAR observation and sensor")
-
-    object_bounds = np.vstack((mesh_vertices, complete_points, partial_points))
     shared_bounds = np.vstack(
-        (object_bounds, sensor_position, sensor_position + forward * 0.45)
+        (
+            mesh_vertices,
+            first_points,
+            second_points,
+            first_pose[:3, 3],
+            second_pose[:3, 3],
+        )
     )
-    for axis in (mesh_axis, complete_axis, observation_axis):
+    for axis in (mesh_axis, first_axis, second_axis):
         set_equal_axes(axis, shared_bounds)
-    observation_axis.legend()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     figure.tight_layout()

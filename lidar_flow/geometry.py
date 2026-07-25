@@ -51,38 +51,6 @@ def normalize_mesh(mesh: trimesh.Trimesh) -> NormalizedMesh:
     return NormalizedMesh(normalized, object_from_original)
 
 
-def sample_surface(
-    mesh: trimesh.Trimesh,
-    candidate_count: int,
-    count: int,
-    normal_weight: float,
-    rng: np.random.Generator,
-) -> FloatArray:
-    face_indices = rng.choice(
-        len(mesh.faces), size=candidate_count, p=mesh.area_faces / mesh.area
-    )
-    triangles = mesh.triangles[face_indices]
-
-    u = np.sqrt(rng.random(candidate_count))
-    v = rng.random(candidate_count)
-    weights = np.column_stack((1.0 - u, u * (1.0 - v), u * v))
-    points = np.einsum("ni,nij->nj", weights, triangles).astype(np.float32)
-    features = np.concatenate(
-        (points, normal_weight * mesh.face_normals[face_indices]), axis=1
-    ).astype(np.float32)
-
-    selected = np.empty(count, dtype=np.int64)
-    selected[0] = np.linalg.norm(points - points.mean(axis=0), axis=1).argmax()
-    distances = np.full(candidate_count, np.inf, dtype=np.float32)
-    for index in range(1, count):
-        offset = features - features[selected[index - 1]]
-        distances = np.minimum(
-            distances, np.einsum("ij,ij->i", offset, offset)
-        )
-        selected[index] = distances.argmax()
-    return points[selected]
-
-
 def _look_at_origin(sensor_position: FloatArray) -> FloatArray:
     forward = -sensor_position / np.linalg.norm(sensor_position)
     reference_up = np.array([0.0, 0.0, 1.0])
@@ -176,3 +144,16 @@ def points_from_scan(
     sensor_hits = sensor_directions.reshape(-1, 3)[ray_indices]
     object_directions = sensor_hits @ object_from_sensor[:3, :3].T
     return object_from_sensor[:3, 3] + object_directions * ranges[:, None]
+
+
+def points_from_state(
+    state: FloatArray,
+    sensor_directions: FloatArray,
+    range_center: float,
+    range_scale: float,
+) -> FloatArray:
+    hits = state[0].reshape(-1) > 0
+    ranges = range_center + range_scale * np.clip(
+        state[1].reshape(-1)[hits], -1.0, 1.0
+    )
+    return sensor_directions.reshape(-1, 3)[hits] * ranges[:, None]

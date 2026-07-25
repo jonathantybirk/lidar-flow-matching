@@ -1,26 +1,16 @@
 # LiDAR Flow Matching
 
-Conditional flow matching for completing an object surface from a simulated
-LiDAR observation and its sensor pose.
+Flow matching for predicting what a LiDAR sensor will observe after it moves:
 
-## Data
+\[
+(P_t,\;T_t^{-1}T_q)\longrightarrow P_q
+\]
 
-The data pipeline uses buses, cars, motorcycles, and trains from ShapeNetCore.
-Each category is split 80/10/10 by model before observations are generated.
-Each processed mesh stores:
-
-- 2,048 surface points selected for spatial and normal coverage;
-- 32 training views or 20 fixed evaluation views;
-- packed ray indices, ranges, and a sensor transform for each view.
-
-Meshes are centred by surface area, scaled to unit radius, and converted from
-Y-up to Z-up coordinates. Training examples receive a random yaw rotation. A
-shared `32 x 32` angular ray grid reconstructs each observed point from its
-stored ray index, range, and sensor transform.
+The object remains static. The relative sensor pose is the action.
 
 ## Setup
 
-The project requires Python 3.14 and [`uv`](https://docs.astral.sh/uv/).
+Python 3.14 and [`uv`](https://docs.astral.sh/uv/) are required.
 
 ```bash
 uv sync
@@ -28,43 +18,35 @@ uv run hf auth login
 uv run wandb login
 ```
 
-ShapeNetCore access must be approved at
+ShapeNetCore access is available from
 [`ShapeNet/ShapeNetCore`](https://huggingface.co/datasets/ShapeNet/ShapeNetCore).
 
-## Preprocessing
+## Data
+
+The current dataset contains buses, cars, motorcycles, and trains. Each object
+has 32 training views or 20 evaluation views from a `32 x 32` LiDAR. Splits are
+made by object before views are generated.
 
 ```bash
 uv run python prepare_data.py download 02924116 02958343 03790512 04468005
 uv run python prepare_data.py generate vehicles 02924116 02958343 03790512 04468005
-```
-
-Processed data is written to `data/processed/vehicles`. Inspect a generated
-sample with:
-
-```bash
 uv run python prepare_data.py inspect vehicles 02958343 <MODEL_ID> --view 0 --show
 ```
 
-`data/` and `artifacts/` are local and excluded from Git.
-
 ## Training
 
-Training uses the train and validation splits. Configuration and checkpoints are
-written to `runs/vehicles`.
-
 ```bash
-uv run python train.py --run vehicles-a100
+uv run python train.py --batch-size 8 --workers 0 --run view-flow-local
+uv run python sample.py runs/view-flow/best.pt
 ```
 
-Generate validation completions from a checkpoint with:
+Training has a deliberately unreachable step ceiling and stops from validation
+or the job time limit. On DTU HPC:
 
 ```bash
-uv run python sample.py runs/vehicles/best.pt
+mkdir -p runs
+bsub < train.lsf
 ```
 
-On DTU HPC, submit with `mkdir -p runs && bsub < train.lsf`. `STEPS`,
-`BATCH_SIZE`, `OUTPUT`, and `RUN_NAME` override the full-run defaults.
-
-Pass `--weights model` to inspect the live training weights.
-
-The model architecture and its sources are recorded in [DESIGN.md](DESIGN.md).
+`BATCH_SIZE`, `STEPS`, `OUTPUT`, and `RUN_NAME` override the job defaults.
+Architecture details are in [DESIGN.md](DESIGN.md).

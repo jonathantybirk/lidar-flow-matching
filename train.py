@@ -15,20 +15,20 @@ from tqdm import tqdm
 import wandb
 
 from lidar_flow.config import load_experiment_config
-from lidar_flow.dataset import CompletionDataset
-from lidar_flow.flow import completion_loss
-from lidar_flow.model import PointFlowTransformer
+from lidar_flow.dataset import ViewDataset
+from lidar_flow.flow import flow_loss, sample
+from lidar_flow.model import LidarFlowTransformer
 
 ROOT = Path(__file__).parent
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train LiDAR point completion")
+    parser = argparse.ArgumentParser(description="Train next-view LiDAR flow")
     parser.add_argument("--config", type=Path, default=ROOT / "configs" / "train.toml")
     parser.add_argument(
         "--data", type=Path, default=ROOT / "data" / "processed" / "vehicles"
     )
-    parser.add_argument("--output", type=Path, default=ROOT / "runs" / "vehicles")
+    parser.add_argument("--output", type=Path, default=ROOT / "runs" / "view-flow")
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--steps", type=int)
@@ -52,7 +52,7 @@ def move(
 
 
 def update_ema(
-    ema: PointFlowTransformer, model: PointFlowTransformer, decay: float
+    ema: LidarFlowTransformer, model: LidarFlowTransformer, decay: float
 ) -> None:
     with torch.no_grad():
         for average, current in zip(ema.parameters(), model.parameters(), strict=True):
@@ -62,28 +62,33 @@ def update_ema(
 
 
 def learning_rate_multiplier(
-    step: int, warmup: int, total: int, minimum: float
+    step: int,
+    warmup: int,
+    decay: int,
+    minimum: float,
 ) -> float:
     if step < warmup:
         return (step + 1) / warmup
-    progress = (step - warmup) / max(1, total - warmup)
+    progress = min(1.0, (step - warmup) / (decay - warmup))
     return minimum + (1 - minimum) * (1 + math.cos(math.pi * progress)) / 2
 
 
 @torch.no_grad()
 def validate(
-    model: PointFlowTransformer,
+    model: LidarFlowTransformer,
     loader: DataLoader,
     target_device: torch.device,
     batches: int,
-    chamfer_weight: float,
-    observation_weight: float,
+    sampling_steps: int,
     seed: int,
 ) -> dict[str, float]:
     model.eval()
-    totals: dict[str, float] = {
-        name: 0.0 for name in ("loss", "flow", "chamfer", "observation")
-    }
+    flow_totals = {name: 0.0 for name in ("loss", "occupancy", "range")}
+    intersection = 0.0
+    union = 0.0
+    predicted_hits = 0.0
+    target_hits = 0.0
+    range_squared_error = 0.0
     generator = torch.Generator(device=target_device).manual_seed(seed)
     for index, batch in enumerate(loader):
         if index == batches:
@@ -93,24 +98,46 @@ def validate(
             batch["target"].shape, generator=generator, device=target_device
         )
         time = torch.rand(len(origin), generator=generator, device=target_device)
-        loss, terms = completion_loss(
-            model, batch, chamfer_weight, observation_weight, origin, time
-        )
-        totals["loss"] += loss.item()
+        loss, terms = flow_loss(model, batch, origin, time)
+        flow_totals["loss"] += loss.item()
         for name, value in terms.items():
-            totals[name] += value.item()
-    return {name: value / batches for name, value in totals.items()}
+            flow_totals[name] += value.item()
+
+        generated = sample(model, batch, sampling_steps, origin)
+        prediction = generated[:, 0] > 0
+        target = batch["target"][:, 0] > 0
+        intersection += (prediction & target).sum().item()
+        union += (prediction | target).sum().item()
+        predicted_hits += prediction.sum().item()
+        target_hits += target.sum().item()
+        range_squared_error += (
+            generated[:, 1][target] - batch["target"][:, 1][target]
+        ).square().sum().item()
+
+    metrics = {
+        f"flow_{name}": value / batches for name, value in flow_totals.items()
+    }
+    metrics.update(
+        {
+            "occupancy_iou": intersection / union,
+            "occupancy_precision": intersection / predicted_hits,
+            "occupancy_recall": intersection / target_hits,
+            "range_rmse": math.sqrt(range_squared_error / target_hits),
+        }
+    )
+    metrics["rollout"] = 1 - metrics["occupancy_iou"] + metrics["range_rmse"]
+    return metrics
 
 
 def save_checkpoint(
     path: Path,
-    model: PointFlowTransformer,
-    ema: PointFlowTransformer,
+    model: LidarFlowTransformer,
+    ema: LidarFlowTransformer,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     step: int,
     config: dict,
-    best_validation: float,
+    best_rollout: float,
     early_stopping_reference: float,
     last_improvement: int,
 ) -> None:
@@ -123,7 +150,7 @@ def save_checkpoint(
             "scheduler": scheduler.state_dict(),
             "step": step,
             "config": config,
-            "best_validation": best_validation,
+            "best_rollout": best_rollout,
             "early_stopping_reference": early_stopping_reference,
             "last_improvement": last_improvement,
         },
@@ -134,20 +161,18 @@ def save_checkpoint(
 
 def save_weights(
     path: Path,
-    model: PointFlowTransformer,
-    ema: PointFlowTransformer,
+    ema: LidarFlowTransformer,
     step: int,
     config: dict,
-    validation: float,
+    metrics: dict[str, float],
 ) -> None:
     temporary = path.with_suffix(".tmp")
     torch.save(
         {
-            "model": model.state_dict(),
-            "ema": ema.state_dict(),
+            "model": ema.state_dict(),
             "step": step,
             "config": config,
-            "validation": validation,
+            "validation": metrics,
         },
         temporary,
     )
@@ -165,15 +190,12 @@ def main() -> None:
     np.random.seed(training.seed)
     torch.manual_seed(training.seed)
     target_device = device()
+    if target_device.type == "cuda":
+        torch.set_float32_matmul_precision("high")
     args.output.mkdir(parents=True, exist_ok=True)
 
     datasets = {
-        split: CompletionDataset(
-            args.data,
-            split,
-            config.model.condition_points,
-            config.model.points,
-        )
+        split: ViewDataset(args.data, split)
         for split in ("train", "validation")
     }
     loaders = {
@@ -188,7 +210,9 @@ def main() -> None:
         )
         for split, dataset in datasets.items()
     }
-    model = PointFlowTransformer(config.model).to(target_device)
+    model = LidarFlowTransformer(
+        config.model, datasets["train"].ray_directions
+    ).to(target_device)
     ema = copy.deepcopy(model).eval()
     for parameter in ema.parameters():
         parameter.requires_grad_(False)
@@ -197,16 +221,20 @@ def main() -> None:
         lr=training.learning_rate,
         betas=(0.9, 0.95),
         weight_decay=training.weight_decay,
+        fused=target_device.type == "cuda",
     )
     minimum = training.minimum_learning_rate / training.learning_rate
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
         lambda step: learning_rate_multiplier(
-            step, training.warmup_steps, steps, minimum
+            step,
+            training.warmup_steps,
+            training.decay_steps,
+            minimum,
         ),
     )
     start = 0
-    best_validation = float("inf")
+    best_rollout = float("inf")
     early_stopping_reference = float("inf")
     last_improvement = 0
     if args.resume:
@@ -218,11 +246,9 @@ def main() -> None:
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])
         start = checkpoint["step"]
-        best_validation = checkpoint.get("best_validation", best_validation)
-        early_stopping_reference = checkpoint.get(
-            "early_stopping_reference", best_validation
-        )
-        last_improvement = checkpoint.get("last_improvement", start)
+        best_rollout = checkpoint["best_rollout"]
+        early_stopping_reference = checkpoint["early_stopping_reference"]
+        last_improvement = checkpoint["last_improvement"]
 
     training_values = asdict(config.training)
     training_values.update(batch_size=batch_size, steps=steps, workers=workers)
@@ -241,7 +267,7 @@ def main() -> None:
     )
     iterator = iter(loaders["train"])
     model.train()
-    running = {name: 0.0 for name in ("loss", "flow", "chamfer", "observation")}
+    running = {name: 0.0 for name in ("loss", "occupancy", "range")}
     last_log = time.perf_counter()
     progress = tqdm(
         range(start + 1, steps + 1),
@@ -267,12 +293,7 @@ def main() -> None:
             dtype=torch.bfloat16,
             enabled=target_device.type == "cuda",
         ):
-            loss, terms = completion_loss(
-                model,
-                batch,
-                training.chamfer_weight,
-                training.observation_weight,
-            )
+            loss, terms = flow_loss(model, batch)
         if not torch.isfinite(loss):
             raise FloatingPointError(f"Non-finite loss at step {step}")
         loss.backward()
@@ -325,60 +346,43 @@ def main() -> None:
             running = {name: 0.0 for name in running}
             last_log = now
         if step % training.validate_every == 0 or step == steps:
-            model_metrics = validate(
-                model,
-                loaders["validation"],
-                target_device,
-                training.validation_batches,
-                training.chamfer_weight,
-                training.observation_weight,
-                training.seed,
-            )
-            ema_metrics = validate(
+            validation_metrics = validate(
                 ema,
                 loaders["validation"],
                 target_device,
                 training.validation_batches,
-                training.chamfer_weight,
-                training.observation_weight,
+                training.sampling_steps,
                 training.seed,
             )
             progress.write(
                 json.dumps(
                     {
                         "step": step,
-                        "validation": {"model": model_metrics, "ema": ema_metrics},
+                        "validation": validation_metrics,
                     }
                 )
             )
             tracking_metrics.update(
                 {
-                    **{
-                        f"validation/model/{name}": value
-                        for name, value in model_metrics.items()
-                    },
-                    **{
-                        f"validation/ema/{name}": value
-                        for name, value in ema_metrics.items()
-                    },
+                    f"validation/{name}": value
+                    for name, value in validation_metrics.items()
                 }
             )
-            validation = ema_metrics["loss"]
-            if validation < best_validation:
-                best_validation = validation
+            rollout = validation_metrics["rollout"]
+            if rollout < best_rollout:
+                best_rollout = rollout
                 save_weights(
                     args.output / "best.pt",
-                    model,
                     ema,
                     step,
                     configuration,
-                    best_validation,
+                    validation_metrics,
                 )
             if (
-                validation
+                rollout
                 < early_stopping_reference - training.early_stopping_min_delta
             ):
-                early_stopping_reference = validation
+                early_stopping_reference = rollout
                 last_improvement = step
             elif step - last_improvement >= training.early_stopping_patience:
                 progress.write(
@@ -386,7 +390,7 @@ def main() -> None:
                         {
                             "step": step,
                             "early_stopping": {
-                                "best_ema_validation": best_validation,
+                                "best_rollout": best_rollout,
                                 "last_meaningful_improvement": last_improvement,
                             },
                         }
@@ -404,7 +408,7 @@ def main() -> None:
                 scheduler,
                 step,
                 configuration,
-                best_validation,
+                best_rollout,
                 early_stopping_reference,
                 last_improvement,
             )

@@ -1,26 +1,27 @@
 # Model design
 
-The model learns a conditional distribution of 2,048-point ground-vehicle
-surfaces from one LiDAR scan and its sensor pose.
+The model generates a query LiDAR observation from a current observation and
+the relative query-sensor pose.
 
-| Choice | Basis |
-|---|---|
-| Straight conditional flow path | [Flow Matching for Generative Modeling](https://arxiv.org/abs/2210.02747) |
-| Pointwise nearest-neighbor target alignment and Chamfer supervision | [LiFlow](https://arxiv.org/abs/2602.02232) |
-| Point-transformer conditioning for completion | [MedPCFM](https://arxiv.org/abs/2606.24433) |
-| Source point supplied to the velocity field | [mmWaveFlow](https://openaccess.thecvf.com/content/CVPR2026/html/Su_mmWaveFlow_Unified_Enhancement_and_Generation_of_mmWave_Human_Point_Clouds_CVPR_2026_paper.html) |
-| Condition tokens gather from moving points, mix globally, and project back | [NOVA3R](https://openreview.net/forum?id=c0QRZMKwSb) |
-| Adaptive LayerNorm with zero-initialized residual gates | [Scalable Diffusion Models with Transformers](https://arxiv.org/abs/2212.09748) |
-| Local processing before global point attention | [LitePT](https://openaccess.thecvf.com/content/CVPR2026/html/Yue_LitePT_Lighter_Yet_Stronger_Point_Transformer_CVPR_2026_paper.html) |
+Each scan is represented internally on its native `32 x 32` ray grid. A cell
+stores hit state and normalized range. This preserves misses, occlusion, and ray
+identity while allowing generated states to be converted directly to 3D points.
 
-Observed points carry object-frame position, ray direction, range, and
-sensor-relative displacement. The sensor token carries position, forward
-direction, hit fraction, and range statistics. The condition encoder produces
-257 tokens. Eight latent-mediated flow blocks predict one velocity per moving
-point. Training uses flow regression, symmetric Chamfer distance, and one-sided
-agreement with measured points. Sampling uses eight Heun steps.
+The current scan and query state are embedded as `2 x 2` patches. Four
+transformer blocks encode the current scan. Eight adaptive-LayerNorm transformer
+blocks process the moving query state with self-attention and cross-attention to
+the current scan. Query-ray origins and directions are expressed in the current
+sensor frame, so the relative pose enters both geometrically and through the
+block conditioning. The initial noise is not provided to the transformer.
 
-The model has 26.8 million parameters at width 256. AdamW uses a cosine schedule,
-bfloat16 arithmetic, gradient clipping, and an exponential moving average.
-Training preserves the best EMA checkpoint and stops after 30,000 steps without
-a meaningful EMA validation improvement.
+Training uses a straight conditional flow path from Gaussian noise to the query
+scan. Occupancy flow and return-range flow receive equal loss weight. Sampling
+uses eight Heun steps. Checkpoint selection and early stopping use complete
+rollouts, combining hit-mask intersection over union with return-range error.
+AdamW, bfloat16, gradient clipping, cosine learning-rate decay, and exponential
+moving averages follow the training setup.
+
+Sources:
+
+- [Flow Matching for Generative Modeling](https://arxiv.org/abs/2210.02747)
+- [Scalable Diffusion Models with Transformers](https://arxiv.org/abs/2212.09748)

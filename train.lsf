@@ -20,7 +20,7 @@ cp -a data/processed/vehicles "$job_data/"
 
 uv run python train.py \
     --data "$job_data/vehicles" \
-    --output "${OUTPUT:-runs/vehicles}" \
+    --output "${OUTPUT:-runs/view-flow}" \
     --batch-size "${BATCH_SIZE:-64}" \
-    --steps "${STEPS:-240000}" \
-    --run "${RUN_NAME:-vehicles-a100}"
+    --steps "${STEPS:-10000000}" \
+    --run "${RUN_NAME:-view-flow-a100}"

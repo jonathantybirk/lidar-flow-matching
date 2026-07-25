@@ -1,7 +1,7 @@
 [project]
 name = "lidar-flow-matching"
 version = "0.1.0"
-description = "Pose-conditioned flow matching for LiDAR point-cloud completion."
+description = "Flow matching for action-conditioned LiDAR prediction."
 requires-python = ">=3.14"
 dependencies = [
     "embreex>=4.4.0",
