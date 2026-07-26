@@ -48,6 +48,8 @@ class TrainingConfig:
     decay_steps: int
     weight_decay: float
     gradient_clip: float
+    skip_threshold: float
+    maximum_consecutive_skips: int
     ema_decay: float
     workers: int
     log_every: int

@@ -268,6 +268,9 @@ def main() -> None:
     iterator = iter(loaders["train"])
     model.train()
     running = {name: 0.0 for name in ("loss", "occupancy", "range")}
+    applied = 0
+    skipped = 0
+    consecutive_skips = 0
     last_log = time.perf_counter()
     progress = tqdm(
         range(start + 1, steps + 1),
@@ -294,40 +297,66 @@ def main() -> None:
             enabled=target_device.type == "cuda",
         ):
             loss, terms = flow_loss(model, batch)
-        if not torch.isfinite(loss):
-            raise FloatingPointError(f"Non-finite loss at step {step}")
         loss.backward()
         gradient_norm = torch.nn.utils.clip_grad_norm_(
-            model.parameters(), training.gradient_clip, error_if_nonfinite=True
+            model.parameters(), training.gradient_clip, error_if_nonfinite=False
         )
-        if gradient_norm > 100 * training.gradient_clip:
-            raise FloatingPointError(
-                f"Gradient norm {gradient_norm.item():.3g} at step {step}"
+        # A spike costs one step rather than the whole job, but a run that only
+        # ever skips is not training and should still fail loudly.
+        skip = (
+            not torch.isfinite(loss)
+            or not torch.isfinite(gradient_norm)
+            or gradient_norm > training.skip_threshold * training.gradient_clip
+        )
+        if skip:
+            skipped += 1
+            consecutive_skips += 1
+            optimizer.zero_grad(set_to_none=True)
+            progress.write(
+                json.dumps(
+                    {
+                        "step": step,
+                        "skipped": {
+                            "loss": loss.item(),
+                            "gradient_norm": gradient_norm.item(),
+                            "total": skipped,
+                        },
+                    }
+                )
             )
-        optimizer.step()
+            if consecutive_skips >= training.maximum_consecutive_skips:
+                raise FloatingPointError(
+                    f"{consecutive_skips} consecutive non-finite or spiking "
+                    f"steps ending at step {step}"
+                )
+        else:
+            consecutive_skips = 0
+            applied += 1
+            optimizer.step()
+            update_ema(ema, model, training.ema_decay)
+            loss_value = loss.item()
+            running["loss"] += loss_value
+            for name, value in terms.items():
+                running[name] += value.item()
+            progress.set_postfix(
+                loss=f"{loss_value:.4f}",
+                lr=f"{scheduler.get_last_lr()[0]:.2e}",
+                refresh=False,
+            )
         scheduler.step()
-        update_ema(ema, model, training.ema_decay)
-        loss_value = loss.item()
-        running["loss"] += loss_value
-        for name, value in terms.items():
-            running[name] += value.item()
-        progress.set_postfix(
-            loss=f"{loss_value:.4f}",
-            lr=f"{scheduler.get_last_lr()[0]:.2e}",
-            refresh=False,
-        )
 
         if step % training.log_every == 0:
             now = time.perf_counter()
             tracking_metrics = {
-                f"train/{name}": value / training.log_every
+                f"train/{name}": value / applied
                 for name, value in running.items()
-            }
+            } if applied else {}
             tracking_metrics.update(
                 {
                     "train/gradient_norm": gradient_norm.item(),
                     "train/learning_rate": scheduler.get_last_lr()[0],
                     "train/steps_per_second": training.log_every / (now - last_log),
+                    "train/skipped_steps": skipped,
                 }
             )
             if target_device.type == "cuda":
@@ -338,12 +367,13 @@ def main() -> None:
                 json.dumps(
                     {
                         "step": step,
-                        "loss": tracking_metrics["train/loss"],
+                        "loss": tracking_metrics.get("train/loss"),
                         "learning_rate": scheduler.get_last_lr()[0],
                     }
                 )
             )
             running = {name: 0.0 for name in running}
+            applied = 0
             last_log = now
         if step % training.validate_every == 0 or step == steps:
             validation_metrics = validate(

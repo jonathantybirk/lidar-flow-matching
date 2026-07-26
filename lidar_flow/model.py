@@ -2,6 +2,7 @@ import math
 
 import torch
 from torch import Tensor, nn
+from torch.nn import functional as F
 
 from lidar_flow.config import ModelConfig
 
@@ -31,14 +32,44 @@ def _modulate(value: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
     return value * (1 + scale[:, None]) + shift[:, None]
 
 
+class Attention(nn.Module):
+    """Attention with normalized queries and keys.
+
+    Modulation scales the block input by ``1 + scale`` before projection, so raw
+    dot-product logits grow with the square of that scale. Normalizing each head
+    of the query and key keeps the logits bounded regardless of conditioning.
+    """
+
+    def __init__(self, width: int, heads: int) -> None:
+        super().__init__()
+        self.heads = heads
+        self.head_width = width // heads
+        self.query = nn.Linear(width, width)
+        self.key = nn.Linear(width, width)
+        self.value = nn.Linear(width, width)
+        self.query_norm = nn.RMSNorm(self.head_width)
+        self.key_norm = nn.RMSNorm(self.head_width)
+        self.output = nn.Linear(width, width)
+
+    def _heads(self, value: Tensor) -> Tensor:
+        return value.unflatten(-1, (self.heads, self.head_width)).transpose(1, 2)
+
+    def forward(self, query: Tensor, context: Tensor) -> Tensor:
+        queries = self.query_norm(self._heads(self.query(query)))
+        keys = self.key_norm(self._heads(self.key(context)))
+        values = self._heads(self.value(context))
+        attended = F.scaled_dot_product_attention(queries, keys, values)
+        return self.output(attended.transpose(1, 2).flatten(2))
+
+
 class FlowBlock(nn.Module):
     def __init__(self, width: int, heads: int) -> None:
         super().__init__()
         self.self_norm = nn.LayerNorm(width, elementwise_affine=False)
         self.cross_norm = nn.LayerNorm(width, elementwise_affine=False)
         self.mlp_norm = nn.LayerNorm(width, elementwise_affine=False)
-        self.self_attention = nn.MultiheadAttention(width, heads, batch_first=True)
-        self.cross_attention = nn.MultiheadAttention(width, heads, batch_first=True)
+        self.self_attention = Attention(width, heads)
+        self.cross_attention = Attention(width, heads)
         self.mlp = nn.Sequential(
             nn.Linear(width, 4 * width),
             nn.GELU(),
@@ -57,13 +88,11 @@ class FlowBlock(nn.Module):
         shift_mlp, scale_mlp, gate_mlp = values[6:]
 
         value = _modulate(self.self_norm(query), shift_self, scale_self)
-        update = self.self_attention(value, value, value, need_weights=False)[0]
+        update = self.self_attention(value, value)
         query = query + gate_self[:, None] * update
 
         value = _modulate(self.cross_norm(query), shift_cross, scale_cross)
-        update = self.cross_attention(
-            value, context, context, need_weights=False
-        )[0]
+        update = self.cross_attention(value, context)
         query = query + gate_cross[:, None] * update
 
         update = self.mlp(_modulate(self.mlp_norm(query), shift_mlp, scale_mlp))
@@ -107,6 +136,7 @@ class LidarFlowTransformer(nn.Module):
             nn.SiLU(),
             nn.Linear(4 * config.width, config.width),
         )
+        self.conditioning_norm = nn.LayerNorm(config.width)
         self.flow_blocks = nn.ModuleList(
             [FlowBlock(config.width, config.heads) for _ in range(config.flow_layers)]
         )
@@ -152,7 +182,9 @@ class LidarFlowTransformer(nn.Module):
             torch.cat((state, self.query_geometry(action)), dim=1),
             self.query_embedding,
         )
-        conditioning = self.time_embedding(time) + self.action_embedding(action)
+        conditioning = self.conditioning_norm(
+            self.time_embedding(time) + self.action_embedding(action)
+        )
         for block in self.flow_blocks:
             query = block(query, context, conditioning)
         patches = self.output(self.output_norm(query))
