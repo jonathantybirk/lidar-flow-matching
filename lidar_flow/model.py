@@ -33,13 +33,6 @@ def _modulate(value: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
 
 
 class Attention(nn.Module):
-    """Attention with normalized queries and keys.
-
-    Modulation scales the block input by ``1 + scale`` before projection, so raw
-    dot-product logits grow with the square of that scale. Normalizing each head
-    of the query and key keeps the logits bounded regardless of conditioning.
-    """
-
     def __init__(self, width: int, heads: int) -> None:
         super().__init__()
         self.heads = heads

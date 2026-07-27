@@ -62,17 +62,10 @@ def main() -> None:
         )
 
     elif args.command == "inspect":
-        processed_directory = DATA / "processed" / args.dataset
         save_inspection_figure(
-            DATA
-            / "raw"
-            / args.synset
-            / args.synset
-            / args.model_id
-            / "models"
-            / "model_normalized.obj",
-            processed_directory / f"{args.synset}_{args.model_id}.npz",
-            processed_directory / "ray_directions.npy",
+            DATA / "raw",
+            DATA / "processed" / args.dataset,
+            f"{args.synset}_{args.model_id}",
             args.view,
             ROOT / "artifacts" / "inspection" / f"{args.model_id}_{args.view:04d}.png",
             show=args.show,

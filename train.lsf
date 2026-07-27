@@ -9,6 +9,8 @@
 
 set -euo pipefail
 
+run=view-flow-a100
+
 cd "$HOME/lidar-flow-matching"
 module load python3/3.14.2
 export PATH="$HOME/.local/bin:$PATH"
@@ -20,7 +22,7 @@ cp -a data/processed/vehicles "$job_data/"
 
 uv run python train.py \
     --data "$job_data/vehicles" \
-    --output "${OUTPUT:-runs/view-flow}" \
-    --batch-size "${BATCH_SIZE:-64}" \
-    --steps "${STEPS:-10000000}" \
-    --run "${RUN_NAME:-view-flow-a100}"
+    --output "runs/$run" \
+    --batch-size 64 \
+    --steps 10000000 \
+    --run "$run"

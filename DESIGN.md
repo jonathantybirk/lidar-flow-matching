@@ -14,6 +14,10 @@ the current scan. Query-ray origins and directions are expressed in the current
 sensor frame, so the relative pose enters both geometrically and through the
 block conditioning. The initial noise is not provided to the transformer.
 
+Modulation scales each block input by `1 + scale`, so attention logits grow with
+the square of the conditioning. Queries and keys are normalized per head and the
+conditioning is normalized before modulation, which bounds the logits.
+
 Training uses a straight conditional flow path from Gaussian noise to the query
 scan. Occupancy flow and return-range flow receive equal loss weight. Sampling
 uses eight Heun steps. Checkpoint selection and early stopping use complete
@@ -25,3 +29,4 @@ Sources:
 
 - [Flow Matching for Generative Modeling](https://arxiv.org/abs/2210.02747)
 - [Scalable Diffusion Models with Transformers](https://arxiv.org/abs/2212.09748)
+- [Scaling Vision Transformers to 22 Billion Parameters](https://arxiv.org/abs/2302.05442)
