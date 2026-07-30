@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
@@ -13,6 +14,14 @@ FloatArray = npt.NDArray[np.floating]
 class NormalizedMesh:
     mesh: trimesh.Trimesh
     object_from_original: FloatArray
+
+
+def object_mesh(raw: Path, model_id: str, object_from_original: FloatArray):
+    synset, model = model_id.split("_", 1)
+    path = raw / synset / synset / model / "models" / "model_normalized.obj"
+    mesh = clean_mesh(trimesh.load_mesh(path, force="mesh", process=False))
+    mesh.apply_transform(object_from_original)
+    return mesh
 
 
 def surface_centroid(mesh: trimesh.Trimesh) -> FloatArray:
@@ -51,7 +60,7 @@ def normalize_mesh(mesh: trimesh.Trimesh) -> NormalizedMesh:
     return NormalizedMesh(normalized, object_from_original)
 
 
-def _look_at_origin(sensor_position: FloatArray) -> FloatArray:
+def look_at_origin(sensor_position: FloatArray) -> FloatArray:
     forward = -sensor_position / np.linalg.norm(sensor_position)
     reference_up = np.array([0.0, 0.0, 1.0])
     if abs(np.dot(forward, reference_up)) > 0.99:
@@ -65,6 +74,26 @@ def _look_at_origin(sensor_position: FloatArray) -> FloatArray:
     object_from_sensor[:3, :3] = np.column_stack((right, up, forward))
     object_from_sensor[:3, 3] = sensor_position
     return object_from_sensor
+
+
+def orbit_pose(azimuth: float, elevation: float, distance: float) -> FloatArray:
+    """Return an object-from-sensor pose on an orbit, with angles in radians."""
+    position = distance * np.array(
+        (
+            np.cos(elevation) * np.cos(azimuth),
+            np.cos(elevation) * np.sin(azimuth),
+            np.sin(elevation),
+        )
+    )
+    return look_at_origin(position)
+
+
+def relative_sensor_action(source_pose: FloatArray, target_pose: FloatArray) -> FloatArray:
+    """Encode a target sensor pose in the source sensor frame."""
+    source_rotation = source_pose[:3, :3]
+    rotation = source_rotation.T @ target_pose[:3, :3]
+    translation = source_rotation.T @ (target_pose[:3, 3] - source_pose[:3, 3])
+    return np.concatenate((rotation.reshape(-1), translation)).astype(np.float32)
 
 
 def sample_sensor_poses(
@@ -88,7 +117,7 @@ def sample_sensor_poses(
             np.sin(elevation),
         )
     )
-    return np.stack([_look_at_origin(position) for position in positions])
+    return np.stack([look_at_origin(position) for position in positions])
 
 
 def make_ray_directions(config: SensorConfig) -> FloatArray:
@@ -125,14 +154,56 @@ def simulate_scan(
     flat_directions = object_directions.reshape(-1, 3)
     origins = np.repeat(object_from_sensor[None, :3, 3], len(flat_directions), axis=0)
 
-    locations, ray_indices, _ = mesh.ray.intersects_location(
-        ray_origins=origins,
-        ray_directions=flat_directions,
-        multiple_hits=False,
-    )
+    try:
+        locations, ray_indices, _ = mesh.ray.intersects_location(
+            ray_origins=origins,
+            ray_directions=flat_directions,
+            multiple_hits=False,
+        )
+    except ModuleNotFoundError as error:
+        if error.name != "rtree":
+            raise
+        locations, ray_indices = _ray_triangle_intersections(
+            mesh.triangles, origins, flat_directions
+        )
     distances = np.linalg.norm(locations - origins[ray_indices], axis=1)
     order = np.argsort(ray_indices)
     return ray_indices[order].astype(np.uint16), distances[order].astype(np.float32)
+
+
+def _ray_triangle_intersections(
+    triangles: FloatArray,
+    origins: FloatArray,
+    directions: FloatArray,
+) -> tuple[FloatArray, npt.NDArray[np.integer]]:
+    """Portable nearest-hit fallback when trimesh's optional index is absent."""
+    first = triangles[:, 0]
+    edge_a = triangles[:, 1] - first
+    edge_b = triangles[:, 2] - first
+    hits = []
+    ray_indices = []
+    for start in range(0, len(directions), 16):
+        stop = min(start + 16, len(directions))
+        rays = directions[start:stop]
+        ray_origins = origins[start:stop]
+        cross_b = np.cross(rays[:, None], edge_b[None])
+        determinant = np.einsum("tj,rtj->rt", edge_a, cross_b)
+        valid = np.abs(determinant) > 1e-8
+        inverse = np.divide(1.0, determinant, out=np.zeros_like(determinant), where=valid)
+        offset = ray_origins[:, None] - first[None]
+        u = np.einsum("rtj,rtj->rt", offset, cross_b) * inverse
+        cross_a = np.cross(offset, edge_a[None])
+        v = np.einsum("rj,rtj->rt", rays, cross_a) * inverse
+        distance = np.einsum("tj,rtj->rt", edge_b, cross_a) * inverse
+        valid &= (u >= 0) & (v >= 0) & (u + v <= 1) & (distance > 1e-8)
+        distance[~valid] = np.inf
+        nearest = distance.argmin(axis=1)
+        nearest_distance = distance[np.arange(len(rays)), nearest]
+        found = np.isfinite(nearest_distance)
+        indices = np.flatnonzero(found) + start
+        ray_indices.extend(indices)
+        hits.extend(ray_origins[found] + rays[found] * nearest_distance[found, None])
+    return np.asarray(hits), np.asarray(ray_indices)
 
 
 def points_from_scan(

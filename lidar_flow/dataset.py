@@ -15,6 +15,7 @@ from lidar_flow.geometry import (
     clean_mesh,
     make_ray_directions,
     normalize_mesh,
+    relative_sensor_action,
     sample_sensor_poses,
     simulate_scan,
 )
@@ -226,16 +227,8 @@ class ViewDataset(Dataset[dict[str, np.ndarray]]):
 
         source_pose = sample["object_from_sensors"][source_view]
         target_pose = sample["object_from_sensors"][target_view]
-        source_rotation = source_pose[:3, :3]
-        relative_rotation = source_rotation.T @ target_pose[:3, :3]
-        relative_translation = source_rotation.T @ (
-            target_pose[:3, 3] - source_pose[:3, 3]
-        )
-        action = np.concatenate(
-            (relative_rotation.reshape(-1), relative_translation)
-        ).astype(np.float32)
         return {
             "current": self.scan_state(sample, source_view),
             "target": self.scan_state(sample, target_view),
-            "action": action,
+            "action": relative_sensor_action(source_pose, target_pose),
         }

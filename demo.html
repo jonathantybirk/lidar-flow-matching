@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LiDAR WAM</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body { margin: 0; background: #eceeed; color: #202124; overflow: hidden; }
+    main { height: 100dvh; display: grid; grid-template-columns: minmax(0, 1fr) 280px; }
+    #views { min-height: 0; display: grid; grid-template-rows: repeat(3, minmax(0, 1fr)); gap: 1px; background: #cfd3d5; }
+    .view { position: relative; min-height: 0; background: #f2f4f3; }
+    canvas { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+    canvas:active { cursor: grabbing; }
+    .label { position: absolute; top: 14px; left: 16px; pointer-events: none; font-size: 13px; font-weight: 600; color: #34373b; }
+    aside { min-height: 0; padding: clamp(14px, 3vh, 28px) 24px; border-left: 1px solid #cfd3d5; background: #fafaf9; overflow: hidden; }
+    h1 { margin: 0 0 7px; font-size: 21px; font-weight: 650; letter-spacing: -.02em; }
+    #model { color: #70757a; font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: clamp(14px, 3vh, 30px); }
+    .control { margin: clamp(11px, 2.4vh, 21px) 0; }
+    .control label { display: flex; justify-content: space-between; margin-bottom: 9px; font-size: 13px; color: #4c5156; }
+    input[type=range] { width: 100%; accent-color: #3267d6; }
+    button { width: 100%; margin-top: 10px; padding: 10px 12px; color: #202124; background: #fff; border: 1px solid #b9bdc2; border-radius: 4px; font: inherit; cursor: pointer; }
+    button:hover { background: #eef2f8; border-color: #8d939a; }
+    .metrics { margin-top: clamp(16px, 3vh, 28px); padding-top: clamp(13px, 2vh, 19px); border-top: 1px solid #d8dadd; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .metric span { display: block; color: #70757a; font-size: 11px; }
+    .metric strong { display: block; margin-top: 5px; font-size: 18px; color: #202124; }
+    #status { margin-top: clamp(13px, 2.5vh, 22px); color: #3267d6; font-size: 12px; }
+    .hint { position: absolute; bottom: 12px; right: 14px; color: #858a90; font-size: 11px; pointer-events: none; }
+    @media (max-width: 760px) {
+      html, body { height: auto; }
+      body { overflow: auto; }
+      main { height: auto; min-height: 100dvh; grid-template-columns: 1fr; }
+      #views { height: auto; grid-template-rows: repeat(3, 320px); }
+      aside { overflow: visible; border-left: 0; border-top: 1px solid #d8dadd; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section id="views">
+    <div class="view"><canvas></canvas><div class="label">Mesh + input scan</div><div class="hint">drag to rotate all views</div></div>
+    <div class="view"><canvas></canvas><div class="label">Model-generated scan</div></div>
+    <div class="view"><canvas></canvas><div class="label">Mesh-simulated scan</div></div>
+  </section>
+  <aside>
+    <h1>LiDAR WAM</h1><div id="model"></div>
+    <div class="control"><label>Azimuth <output id="azValue">0°</output></label><input id="az" type="range" min="-180" max="180" value="0" step="1"></div>
+    <div class="control"><label>Elevation <output id="elValue">5°</output></label><input id="el" type="range" min="-30" max="45" value="5" step="1"></div>
+    <button id="resample">Resample noise</button>
+    <div class="metrics"><div class="metric"><span>Hit IoU</span><strong id="iou">—</strong></div><div class="metric"><span>Range RMSE</span><strong id="rmse">—</strong></div></div>
+    <div id="status">Loading…</div>
+  </aside>
+</main>
+<script>
+const canvases = [...document.querySelectorAll('canvas')];
+const az = document.querySelector('#az'), el = document.querySelector('#el');
+let scene, result, yaw = -.75, pitch = .3, timer, request = 0;
+
+function rotate([x,y,z]) {
+  const cy=Math.cos(yaw), sy=Math.sin(yaw), cp=Math.cos(pitch), sp=Math.sin(pitch);
+  const a=cy*x-sy*y, b=sy*x+cy*y;
+  return [a, cp*z-sp*b, sp*z+cp*b];
+}
+function projector(canvas) {
+  const dpr=devicePixelRatio, rect=canvas.getBoundingClientRect();
+  canvas.width=rect.width*dpr; canvas.height=rect.height*dpr;
+  const ctx=canvas.getContext('2d'); ctx.scale(dpr,dpr);
+  const scale=Math.min(rect.width,rect.height)*.27;
+  return {ctx, point:p=>{const [x,y,z]=rotate(p), k=3.8/(3.8-z); return [rect.width/2+x*scale*k,rect.height/2-y*scale*k,z];}};
+}
+function dots(ctx, project, points, color, radius=1.7) {
+  ctx.fillStyle=color;
+  for(const p of points){const [x,y]=project(p); ctx.beginPath(); ctx.arc(x,y,radius,0,7); ctx.fill();}
+}
+function sensor(ctx, project, p, color) {
+  const [x,y]=project(p); ctx.strokeStyle=color; ctx.lineWidth=1.5; ctx.beginPath(); ctx.arc(x,y,6,0,7); ctx.stroke(); ctx.beginPath(); ctx.moveTo(x-9,y);ctx.lineTo(x+9,y);ctx.moveTo(x,y-9);ctx.lineTo(x,y+9);ctx.stroke();
+}
+function draw() {
+  if(!scene) return;
+  canvases.forEach((canvas,index)=>{
+    const {ctx,point}=projector(canvas);
+    if(index===0){
+      const vertices=scene.mesh.map(point);
+      const faces=scene.faces.map(f=>({p:f.map(i=>vertices[i]),z:f.reduce((s,i)=>s+vertices[i][2],0)})).sort((a,b)=>a.z-b.z);
+      ctx.fillStyle='#dfe4e8'; ctx.strokeStyle='#aeb6bd'; ctx.lineWidth=.35;
+      for(const f of faces){ctx.beginPath();ctx.moveTo(f.p[0][0],f.p[0][1]);ctx.lineTo(f.p[1][0],f.p[1][1]);ctx.lineTo(f.p[2][0],f.p[2][1]);ctx.closePath();ctx.fill();ctx.stroke();}
+      dots(ctx,point,scene.source,'#d97706',1.5); sensor(ctx,point,scene.sourcePosition,'#d97706');
+    }
+    if(result){
+      if(index===1) dots(ctx,point,result.predicted,'#2f7d32');
+      if(index===2) dots(ctx,point,result.actual,'#2563eb');
+      sensor(ctx,point,result.targetPosition,'#c2414f');
+    }
+  });
+}
+async function predict(resample=false) {
+  const id=++request; document.querySelector('#status').textContent='Generating…';
+  try {
+    const response=await fetch('/predict',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({azimuth:+az.value,elevation:+el.value,resample})});
+    if(id!==request) return; result=await response.json();
+    document.querySelector('#iou').textContent=result.iou.toFixed(3); document.querySelector('#rmse').textContent=result.rmse.toFixed(3);
+    document.querySelector('#status').textContent=`${result.predicted.length} predicted returns`; draw();
+  } catch(error) {
+    if(id===request) document.querySelector('#status').textContent='Prediction failed — check the demo terminal';
+  }
+}
+function poseChanged(){document.querySelector('#azValue').textContent=az.value+'°';document.querySelector('#elValue').textContent=el.value+'°';clearTimeout(timer);timer=setTimeout(()=>predict(),120);}
+for(const input of [az,el]) input.addEventListener('input',poseChanged);
+document.querySelector('#resample').onclick=()=>predict(true);
+
+let drag;
+for(const canvas of canvases){canvas.onpointerdown=e=>{drag=[e.clientX,e.clientY];canvas.setPointerCapture(e.pointerId)};canvas.onpointermove=e=>{if(!drag)return;yaw+=(e.clientX-drag[0])*.008;pitch=Math.max(-1.3,Math.min(1.3,pitch+(e.clientY-drag[1])*.008));drag=[e.clientX,e.clientY];draw()};canvas.onpointerup=()=>drag=null;}
+addEventListener('resize',draw);
+
+fetch('/scene').then(r=>r.json()).then(data=>{scene=data;document.querySelector('#model').textContent=data.model;draw();predict()}).catch(()=>document.querySelector('#status').textContent='Could not load scene');
+</script>
+</body>
+</html>

@@ -37,11 +37,12 @@ def sample(
     batch: dict[str, Tensor],
     steps: int = 8,
     origin: Tensor | None = None,
+    context: Tensor | None = None,
 ) -> Tensor:
     if origin is None:
         origin = torch.randn_like(batch["current"])
     state = origin.clone()
-    context = model.encode(batch["current"])
+    context = model.encode(batch["current"]) if context is None else context
     step_size = 1 / steps
     for step in range(steps):
         time = torch.full(

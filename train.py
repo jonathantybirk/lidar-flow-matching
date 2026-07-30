@@ -17,7 +17,7 @@ import wandb
 from lidar_flow.config import load_experiment_config
 from lidar_flow.dataset import ViewDataset
 from lidar_flow.flow import flow_loss, sample
-from lidar_flow.model import LidarFlowTransformer
+from lidar_flow.model import LidarFlowTransformer, device
 
 ROOT = Path(__file__).parent
 
@@ -35,14 +35,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers", type=int)
     parser.add_argument("--run")
     return parser.parse_args()
-
-
-def device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
 
 
 def move(

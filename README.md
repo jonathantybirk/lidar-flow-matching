@@ -40,6 +40,14 @@ uv run python train.py --batch-size 8 --workers 0 --run view-flow-local
 uv run python review.py runs/view-flow-a100/best.pt
 ```
 
+Explore a prediction against a live mesh raycast in the local browser demo:
+
+```bash
+uv run python demo.py
+```
+
+Pass a checkpoint path or `--model-id` to override the defaults.
+
 `review.py` renders the source mesh, the target scan, the input scan and the
 generated scan in the object frame, with hit-mask IoU and return-range error.
 Cars are two thirds of the data, so `--synset` is needed to reach the others.

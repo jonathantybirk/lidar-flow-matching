@@ -2,18 +2,9 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-import trimesh
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-from lidar_flow.geometry import clean_mesh, points_from_scan
-
-
-def object_mesh(raw: Path, model_id: str, object_from_original: np.ndarray):
-    synset, model = model_id.split("_", 1)
-    path = raw / synset / synset / model / "models" / "model_normalized.obj"
-    mesh = clean_mesh(trimesh.load_mesh(path, force="mesh", process=False))
-    mesh.apply_transform(object_from_original)
-    return mesh
+from lidar_flow.geometry import object_mesh, points_from_scan
 
 
 def set_equal_axes(axis, points: np.ndarray) -> None:

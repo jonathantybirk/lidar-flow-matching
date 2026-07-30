@@ -7,6 +7,14 @@ from torch.nn import functional as F
 from lidar_flow.config import ModelConfig
 
 
+def device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 class TimestepEmbedding(nn.Module):
     def __init__(self, width: int) -> None:
         super().__init__()

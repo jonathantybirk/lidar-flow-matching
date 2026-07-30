@@ -11,9 +11,9 @@ from lidar_flow.config import ModelConfig
 from lidar_flow.dataset import ViewDataset
 from lidar_flow.flow import sample
 from lidar_flow.geometry import points_from_state
-from lidar_flow.model import LidarFlowTransformer
+from lidar_flow.model import LidarFlowTransformer, device
 from lidar_flow.visualize import draw_mesh, draw_sensor, object_mesh, set_equal_axes
-from train import device, move
+from train import move
 
 ROOT = Path(__file__).parent
 
