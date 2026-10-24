@@ -5,7 +5,7 @@ import math
 import random
 import sys
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -14,17 +14,37 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import wandb
 
-from lidar_flow.config import load_experiment_config
 from lidar_flow.dataset import ViewDataset
 from lidar_flow.flow import flow_loss, sample
-from lidar_flow.model import LidarFlowTransformer, device
+from lidar_flow.model import LidarFlowTransformer, ModelConfig, device
 
 ROOT = Path(__file__).parent
 
 
+@dataclass(frozen=True)
+class TrainingConfig:
+    batch_size: int = 64
+    steps: int = 10_000_000  # unreachable; early stopping or the job limit ends a run
+    learning_rate: float = 2e-4
+    minimum_learning_rate: float = 2e-5
+    warmup_steps: int = 2000
+    decay_steps: int = 240_000
+    weight_decay: float = 0.05
+    gradient_clip: float = 1.0
+    ema_decay: float = 0.9999
+    workers: int = 8
+    log_every: int = 50
+    validate_every: int = 2500
+    checkpoint_every: int = 2500
+    validation_batches: int = 8
+    sampling_steps: int = 8
+    early_stopping_patience: int = 30_000
+    early_stopping_min_delta: float = 0.001
+    seed: int = 42
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train next-view LiDAR flow")
-    parser.add_argument("--config", type=Path, default=ROOT / "configs" / "train.toml")
     parser.add_argument(
         "--data", type=Path, default=ROOT / "data" / "processed" / "vehicles"
     )
@@ -173,11 +193,13 @@ def save_weights(
 
 def main() -> None:
     args = parse_args()
-    config = load_experiment_config(args.config)
-    training = config.training
-    batch_size = args.batch_size or training.batch_size
-    steps = args.steps or training.steps
-    workers = training.workers if args.workers is None else args.workers
+    overrides = {
+        name: getattr(args, name)
+        for name in ("batch_size", "steps", "workers")
+        if getattr(args, name) is not None
+    }
+    training = replace(TrainingConfig(), **overrides)
+    model_config = ModelConfig()
     random.seed(training.seed)
     np.random.seed(training.seed)
     torch.manual_seed(training.seed)
@@ -193,17 +215,17 @@ def main() -> None:
     loaders = {
         split: DataLoader(
             dataset,
-            batch_size=batch_size,
+            batch_size=training.batch_size,
             shuffle=split == "train",
-            num_workers=workers,
+            num_workers=training.workers,
             pin_memory=target_device.type == "cuda",
-            persistent_workers=workers > 0,
+            persistent_workers=training.workers > 0,
             drop_last=split == "train",
         )
         for split, dataset in datasets.items()
     }
     model = LidarFlowTransformer(
-        config.model, datasets["train"].ray_directions
+        model_config, datasets["train"].ray_directions
     ).to(target_device)
     ema = copy.deepcopy(model).eval()
     for parameter in ema.parameters():
@@ -242,9 +264,7 @@ def main() -> None:
         early_stopping_reference = checkpoint["early_stopping_reference"]
         last_improvement = checkpoint["last_improvement"]
 
-    training_values = asdict(config.training)
-    training_values.update(batch_size=batch_size, steps=steps, workers=workers)
-    configuration = {"model": asdict(config.model), "training": training_values}
+    configuration = {"model": asdict(model_config), "training": asdict(training)}
     (args.output / "config.json").write_text(
         json.dumps(configuration, indent=2) + "\n", encoding="utf-8"
     )
@@ -262,8 +282,8 @@ def main() -> None:
     running = {name: 0.0 for name in ("loss", "occupancy", "range")}
     last_log = time.perf_counter()
     progress = tqdm(
-        range(start + 1, steps + 1),
-        total=steps,
+        range(start + 1, training.steps + 1),
+        total=training.steps,
         initial=start,
         desc=f"Training on {target_device.type}",
         unit="step",
@@ -337,7 +357,7 @@ def main() -> None:
             )
             running = {name: 0.0 for name in running}
             last_log = now
-        if step % training.validate_every == 0 or step == steps:
+        if step % training.validate_every == 0 or step == training.steps:
             validation_metrics = validate(
                 ema,
                 loaders["validation"],
@@ -391,7 +411,7 @@ def main() -> None:
                 stop = True
             model.train()
             last_log = time.perf_counter()
-        if step % training.checkpoint_every == 0 or step == steps or stop:
+        if step % training.checkpoint_every == 0 or step == training.steps or stop:
             save_checkpoint(
                 args.output / "checkpoint.pt",
                 model,

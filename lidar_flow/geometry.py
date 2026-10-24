@@ -5,8 +5,6 @@ import numpy as np
 import numpy.typing as npt
 import trimesh
 
-from lidar_flow.config import SensorConfig
-
 FloatArray = npt.NDArray[np.floating]
 
 
@@ -109,29 +107,28 @@ def sample_sensor_poses(
     minimum_sine = np.sin(np.deg2rad(minimum_elevation_degrees))
     maximum_sine = np.sin(np.deg2rad(maximum_elevation_degrees))
     elevation = np.arcsin(minimum_sine + elevation_bins * (maximum_sine - minimum_sine))
-
-    positions = distance * np.column_stack(
-        (
-            np.cos(elevation) * np.cos(azimuth),
-            np.cos(elevation) * np.sin(azimuth),
-            np.sin(elevation),
-        )
+    return np.stack(
+        [orbit_pose(*angles, distance) for angles in zip(azimuth, elevation)]
     )
-    return np.stack([look_at_origin(position) for position in positions])
 
 
-def make_ray_directions(config: SensorConfig) -> FloatArray:
-    if config.height * config.width > np.iinfo(np.uint16).max:
+def make_ray_directions(
+    height: int,
+    width: int,
+    horizontal_fov_degrees: float,
+    vertical_fov_degrees: float,
+) -> FloatArray:
+    if height * width > np.iinfo(np.uint16).max:
         raise ValueError("Sensor grid exceeds the ray-index data type")
     horizontal = np.linspace(
-        -np.deg2rad(config.horizontal_fov_degrees) / 2,
-        np.deg2rad(config.horizontal_fov_degrees) / 2,
-        config.width,
+        -np.deg2rad(horizontal_fov_degrees) / 2,
+        np.deg2rad(horizontal_fov_degrees) / 2,
+        width,
     )
     vertical = np.linspace(
-        -np.deg2rad(config.vertical_fov_degrees) / 2,
-        np.deg2rad(config.vertical_fov_degrees) / 2,
-        config.height,
+        -np.deg2rad(vertical_fov_degrees) / 2,
+        np.deg2rad(vertical_fov_degrees) / 2,
+        height,
     )
     horizontal_grid, vertical_grid = np.meshgrid(horizontal, vertical)
     directions = np.stack(
@@ -154,56 +151,14 @@ def simulate_scan(
     flat_directions = object_directions.reshape(-1, 3)
     origins = np.repeat(object_from_sensor[None, :3, 3], len(flat_directions), axis=0)
 
-    try:
-        locations, ray_indices, _ = mesh.ray.intersects_location(
-            ray_origins=origins,
-            ray_directions=flat_directions,
-            multiple_hits=False,
-        )
-    except ModuleNotFoundError as error:
-        if error.name != "rtree":
-            raise
-        locations, ray_indices = _ray_triangle_intersections(
-            mesh.triangles, origins, flat_directions
-        )
+    locations, ray_indices, _ = mesh.ray.intersects_location(
+        ray_origins=origins,
+        ray_directions=flat_directions,
+        multiple_hits=False,
+    )
     distances = np.linalg.norm(locations - origins[ray_indices], axis=1)
     order = np.argsort(ray_indices)
     return ray_indices[order].astype(np.uint16), distances[order].astype(np.float32)
-
-
-def _ray_triangle_intersections(
-    triangles: FloatArray,
-    origins: FloatArray,
-    directions: FloatArray,
-) -> tuple[FloatArray, npt.NDArray[np.integer]]:
-    """Portable nearest-hit fallback when trimesh's optional index is absent."""
-    first = triangles[:, 0]
-    edge_a = triangles[:, 1] - first
-    edge_b = triangles[:, 2] - first
-    hits = []
-    ray_indices = []
-    for start in range(0, len(directions), 16):
-        stop = min(start + 16, len(directions))
-        rays = directions[start:stop]
-        ray_origins = origins[start:stop]
-        cross_b = np.cross(rays[:, None], edge_b[None])
-        determinant = np.einsum("tj,rtj->rt", edge_a, cross_b)
-        valid = np.abs(determinant) > 1e-8
-        inverse = np.divide(1.0, determinant, out=np.zeros_like(determinant), where=valid)
-        offset = ray_origins[:, None] - first[None]
-        u = np.einsum("rtj,rtj->rt", offset, cross_b) * inverse
-        cross_a = np.cross(offset, edge_a[None])
-        v = np.einsum("rj,rtj->rt", rays, cross_a) * inverse
-        distance = np.einsum("tj,rtj->rt", edge_b, cross_a) * inverse
-        valid &= (u >= 0) & (v >= 0) & (u + v <= 1) & (distance > 1e-8)
-        distance[~valid] = np.inf
-        nearest = distance.argmin(axis=1)
-        nearest_distance = distance[np.arange(len(rays)), nearest]
-        found = np.isfinite(nearest_distance)
-        indices = np.flatnonzero(found) + start
-        ray_indices.extend(indices)
-        hits.extend(ray_origins[found] + rays[found] * nearest_distance[found, None])
-    return np.asarray(hits), np.asarray(ray_indices)
 
 
 def points_from_scan(
@@ -221,10 +176,9 @@ def points_from_state(
     state: FloatArray,
     sensor_directions: FloatArray,
     range_center: float,
-    range_scale: float,
 ) -> FloatArray:
     hits = state[0].reshape(-1) > 0
-    ranges = range_center + range_scale * np.clip(
+    ranges = range_center + np.clip(
         state[1].reshape(-1)[hits], -1.0, 1.0
     )
     return sensor_directions.reshape(-1, 3)[hits] * ranges[:, None]

@@ -1,10 +1,20 @@
 import math
+from dataclasses import dataclass
+from pathlib import Path
 
+import numpy as np
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from lidar_flow.config import ModelConfig
+
+@dataclass(frozen=True)
+class ModelConfig:
+    patch_size: int = 2
+    width: int = 256
+    heads: int = 8
+    condition_layers: int = 4
+    flow_layers: int = 8
 
 
 def device() -> torch.device:
@@ -209,3 +219,15 @@ class LidarFlowTransformer(nn.Module):
         return self.velocity(
             state, time, action, self.encode(current)
         )
+
+
+def load_model(
+    path: Path, ray_directions: np.ndarray, target_device: torch.device
+) -> tuple[LidarFlowTransformer, dict]:
+    """Load EMA weights saved by train.py as best.pt."""
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    model = LidarFlowTransformer(
+        ModelConfig(**checkpoint["config"]["model"]), ray_directions
+    )
+    model.load_state_dict(checkpoint["model"])
+    return model.to(target_device).eval(), checkpoint
