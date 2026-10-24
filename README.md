@@ -38,6 +38,12 @@ against a single ground truth therefore undersell a generative model. The real
 test is visual inspection against the mesh, which `review.py` and `demo.py`
 provide.
 
+```bash
+uv run python evaluate.py
+```
+
+This reproduces the table and writes per-pair counts to `artifacts/evaluation/`.
+
 ## Setup
 
 Python 3.14 and [`uv`](https://docs.astral.sh/uv/) are required.
@@ -70,8 +76,10 @@ uv run python prepare_data.py inspect vehicles 02958343 <MODEL_ID> --view 0 --sh
 uv run python train.py --batch-size 8 --workers 0 --run view-flow-local
 ```
 
-Training has a deliberately unreachable step ceiling and stops from validation
-or the job time limit. On DTU HPC, set `run` at the top of `train.lsf`, then:
+Hyperparameters are the defaults of `TrainingConfig` in `train.py` and
+`ModelConfig` in `lidar_flow/model.py`. Training has a deliberately unreachable
+step ceiling and stops from validation or the job time limit. On DTU HPC, set
+`run` at the top of `train.lsf`, then:
 
 ```bash
 mkdir -p runs
@@ -82,8 +90,11 @@ Architecture details are in [DESIGN.md](DESIGN.md).
 
 ## Review and demo
 
+`evaluate.py`, `review.py` and `demo.py` load `runs/view-flow-a100-qknorm/best.pt`
+by default. Pass another checkpoint path as the first argument.
+
 ```bash
-uv run python review.py runs/view-flow-a100/best.pt
+uv run python review.py
 ```
 
 `review.py` renders the mesh, input scan, true scan and generated scan in the
@@ -95,6 +106,4 @@ uv run python demo.py
 ```
 
 `demo.py` serves a local browser page that compares a prediction against a live
-raycast of the mesh as you move the sensor. It loads
-`artifacts/checkpoints/a100-qknorm-best.pt` by default. Pass a checkpoint path
-or `--model-id` to override.
+raycast of the mesh as you move the sensor. `--model-id` picks the object.

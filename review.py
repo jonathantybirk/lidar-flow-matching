@@ -7,20 +7,23 @@ import numpy as np
 import torch
 from torch.utils.data import default_collate
 
-from lidar_flow.config import ModelConfig
-from lidar_flow.dataset import ViewDataset
+from lidar_flow.dataset import ViewDataset, evaluation_target
 from lidar_flow.flow import sample
-from lidar_flow.geometry import points_from_state
-from lidar_flow.model import LidarFlowTransformer, device
-from lidar_flow.visualize import draw_mesh, draw_sensor, object_mesh, set_equal_axes
-from train import move
+from lidar_flow.geometry import object_mesh, points_from_state
+from lidar_flow.model import LidarFlowTransformer, device, load_model
+from lidar_flow.visualize import draw_mesh, draw_sensor, set_equal_axes
 
 ROOT = Path(__file__).parent
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Review generated views")
-    parser.add_argument("checkpoint", type=Path)
+    parser.add_argument(
+        "checkpoint",
+        type=Path,
+        nargs="?",
+        default=ROOT / "runs/view-flow-a100-qknorm/best.pt",
+    )
     parser.add_argument("--data", type=Path, default=ROOT / "data/processed/vehicles")
     parser.add_argument("--raw", type=Path, default=ROOT / "data/raw")
     parser.add_argument("--splits", nargs="+", default=("validation", "test"))
@@ -44,19 +47,19 @@ def review(
 ) -> dict[str, float]:
     path, source_view, views = dataset.items[index]
     item = dataset[index]
-    target_view = (source_view + 1 + views // 3) % views
-    generated = sample(
-        model, move(default_collate([item]), target_device), steps=args.steps
-    )[0].cpu().numpy()
+    target_view = evaluation_target(source_view, views)
+    batch = {
+        name: value.to(target_device)
+        for name, value in default_collate([item]).items()
+    }
+    generated = sample(model, batch, steps=args.steps)[0].cpu().numpy()
 
     with np.load(path) as stored:
         poses = stored["object_from_sensors"]
         mesh = object_mesh(args.raw, path.stem, stored["object_from_original"])
 
     def scan(state: np.ndarray, view: int) -> np.ndarray:
-        points = points_from_state(
-            state, dataset.ray_directions, dataset.range_center, dataset.range_scale
-        )
+        points = points_from_state(state, dataset.ray_directions, dataset.range_center)
         return points @ poses[view][:3, :3].T + poses[view][:3, 3]
 
     current = scan(item["current"], source_view)
@@ -115,19 +118,12 @@ def main() -> None:
     args = parse_args()
     target_device = device()
     torch.manual_seed(args.seed)
-    checkpoint = torch.load(
-        args.checkpoint, map_location=target_device, weights_only=True
-    )
     generator = np.random.default_rng(args.seed)
 
     results = []
     for split in args.splits:
         dataset = ViewDataset(args.data, split)
-        model = LidarFlowTransformer(
-            ModelConfig(**checkpoint["config"]["model"]), dataset.ray_directions
-        ).to(target_device)
-        model.load_state_dict(checkpoint["model"])
-        model.eval()
+        model, _ = load_model(args.checkpoint, dataset.ray_directions, target_device)
         candidates = [
             index
             for index, (path, _, _) in enumerate(dataset.items)

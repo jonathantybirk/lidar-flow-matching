@@ -8,7 +8,6 @@ import webbrowser
 import numpy as np
 import torch
 
-from lidar_flow.config import ModelConfig
 from lidar_flow.dataset import ViewDataset
 from lidar_flow.flow import sample
 from lidar_flow.geometry import (
@@ -19,10 +18,10 @@ from lidar_flow.geometry import (
     relative_sensor_action,
     simulate_scan,
 )
-from lidar_flow.model import LidarFlowTransformer, device
+from lidar_flow.model import device, load_model
 
 ROOT = Path(__file__).parent
-DEFAULT_CHECKPOINT = ROOT / "artifacts/checkpoints/a100-qknorm-best.pt"
+DEFAULT_CHECKPOINT = ROOT / "runs/view-flow-a100-qknorm/best.pt"
 PAGE = ROOT / "demo.html"
 
 
@@ -85,14 +84,7 @@ class Demo:
         current = dataset[matches[0]]["current"]
 
         target_device = device()
-        checkpoint = torch.load(
-            args.checkpoint, map_location=target_device, weights_only=True
-        )
-        model = LidarFlowTransformer(
-            ModelConfig(**checkpoint["config"]["model"]), dataset.ray_directions
-        ).to(target_device)
-        model.load_state_dict(checkpoint["model"])
-        model.eval()
+        model, _ = load_model(args.checkpoint, dataset.ray_directions, target_device)
 
         with np.load(args.data / f"{model_id}.npz") as stored:
             poses = stored["object_from_sensors"]
@@ -102,7 +94,6 @@ class Demo:
             current,
             dataset.ray_directions,
             dataset.range_center,
-            dataset.range_scale,
         ) @ source_pose[:3, :3].T + source_pose[:3, 3]
         vertices, faces = compact_mesh(mesh)
 
@@ -161,7 +152,6 @@ class Demo:
             generated,
             self.dataset.ray_directions,
             self.dataset.range_center,
-            self.dataset.range_scale,
         ) @ pose[:3, :3].T + pose[:3, 3]
         actual = points_from_scan(
             ranges, indices, self.dataset.ray_directions, pose
